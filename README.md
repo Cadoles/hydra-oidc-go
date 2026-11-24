@@ -13,7 +13,7 @@ it is an environment variable with a neutral default.
    redirects the browser to the upstream provider's authorization endpoint.
 3. The provider redirects back to `GET /callback` (`CALLBACK_PATH`). The app validates `state`, exchanges the code
    (with PKCE), verifies the `id_token` (signature via JWKS, audience, expiry, nonce), fetches
-   userinfo (JSON or JWT) unless `OIDC_SKIP_USERINFO` is set, and **accepts the Hydra login** with
+   userinfo (JSON or JWT) unless `OIDC_SKIP_USERINFO` is set or no userinfo endpoint is known, and **accepts the Hydra login** with
    `subject = upstream sub` and the upstream claims carried in Hydra's `context`. The userinfo
    `sub` must be the `id_token`'s, and a userinfo sent as a JWT is verified with the provider's
    keys (unless `OIDC_VERIFY_SIGNATURE` is off). A userinfo that fails, or does not pass these
@@ -26,8 +26,11 @@ it is an environment variable with a neutral default.
    logout, once the `state` the provider returns is the one it was sent.
 
 A challenge already used or expired (the browser's back button, a double click) is answered by
-Hydra, or the dispatcher, with a 410 and a `redirect_to`: the app follows it, as it follows the
-answer of an accept.
+Hydra, or the dispatcher, with a 410 and a `redirect_to` when it is read: the app follows it, as
+it follows the answer of an accept. An accept replayed is another matter (Hydra answers 409, an
+error), so the app never replays one: a callback that returns with the `state` of a login already
+accepted exchanges nothing and accepts nothing, whoever signed in at the provider this time; it
+reads the challenge and follows where the flow went.
 
 ### Errors
 
@@ -43,9 +46,9 @@ one. It needs `OIDC_LOGOUT_ENDPOINT`.
 No server-side session. Cross-redirect state travels in **encrypted, signed cookies**
 (`gorilla/securecookie`, keys derived from `APP_SECRET`):
 
-- `oidc_flow` — `state`, `nonce`, PKCE verifier, login challenge (login → callback, 10 min). It is
-  kept after the login, until it expires: the back button returns to the provider, which answers
-  with the same `state`.
+- `oidc_flow` — `state`, `nonce`, PKCE verifier, login challenge (login → callback, 10 min). Once
+  the login is accepted it is replaced by a mark, the `state` and the challenge alone, which
+  recognises a replayed callback until it expires.
 - `oidc_session` — the upstream `id_token`, needed as `id_token_hint` at logout. Held in the cookie
   by default; when `REDIS_DSN` is set it is stored in Redis under an opaque id and the cookie holds
   only that id. It lasts `HYDRA_OIDC_REDIS_TTL` in both cases: after it, a logout no longer goes

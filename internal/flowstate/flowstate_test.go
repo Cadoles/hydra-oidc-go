@@ -66,10 +66,14 @@ func TestSessionCookieOnly(t *testing.T) {
 }
 
 // memStore is an in-memory Store for testing the Redis-backed path.
-type memStore struct{ m map[string]string }
+type memStore struct {
+	m   map[string]string
+	ttl time.Duration // of the last Put
+}
 
-func (s *memStore) Put(_ context.Context, k, v string, _ time.Duration) error {
+func (s *memStore) Put(_ context.Context, k, v string, ttl time.Duration) error {
 	s.m[k] = v
+	s.ttl = ttl
 	return nil
 }
 func (s *memStore) Get(_ context.Context, k string) (string, error) { return s.m[k], nil }
@@ -77,10 +81,17 @@ func (s *memStore) Del(_ context.Context, k string) error           { delete(s.m
 
 func TestSessionWithStore(t *testing.T) {
 	store := &memStore{m: map[string]string{}}
-	m := New(secret, "/", false, store, time.Hour)
+	m := New(secret, "/", false, store, 2*time.Hour)
 	rec := httptest.NewRecorder()
 	if err := m.SetSession(context.Background(), rec, "BIG.JWT.TOKEN"); err != nil {
 		t.Fatalf("SetSession: %v", err)
+	}
+	// The entry lasts as long as the cookie that names it.
+	if store.ttl != 2*time.Hour {
+		t.Errorf("ttl of the entry = %v, want 2h", store.ttl)
+	}
+	if c := rec.Result().Cookies(); len(c) != 1 || c[0].MaxAge != 7200 {
+		t.Errorf("session cookie = %+v", c)
 	}
 	// The cookie must hold an opaque id, not the token itself.
 	for _, c := range rec.Result().Cookies() {

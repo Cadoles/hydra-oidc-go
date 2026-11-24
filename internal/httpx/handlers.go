@@ -96,6 +96,10 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		s.errorRedirect(w, r, http.StatusForbidden, "state mismatch", nil)
 		return
 	}
+	if fs.Done {
+		s.callbackReplayed(w, r, fs)
+		return
+	}
 	code := q.Get("code")
 	if code == "" {
 		s.errorRedirect(w, r, http.StatusBadRequest, "missing authorization code", nil)
@@ -183,13 +187,32 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		s.Logger.Error("could not persist the upstream session: the logout will not go through the provider", "err", err)
 		s.Reporter.Capture(err)
 	}
-	// The flow cookie is kept until it expires: the browser's back button
-	// returns to the provider, which sends a new code with the same state.
-	// The accept then answers where the finished flow went, instead of an
-	// error for a missing cookie.
+	// The flow is over: its cookie becomes a mark, without nonce nor PKCE
+	// verifier, so that a callback replayed with the same state (the back
+	// button returns to the provider, which answers again) is recognised
+	// and exchanges nothing (callbackReplayed).
+	if err := s.Flow.SetFlow(w, flowstate.FlowState{State: fs.State, LoginChallenge: fs.LoginChallenge, Done: true}); err != nil {
+		s.Logger.Warn("could not mark the flow as done", "err", err)
+		s.Flow.ClearFlow(w)
+	}
 	s.Metrics.LoginOutcome(metrics.LoginSuccess)
 	s.Logger.Info("login accepted", "challenge", fs.LoginChallenge, "subject", subject)
 	http.Redirect(w, r, redirect, http.StatusSeeOther)
+}
+
+// callbackReplayed answers a callback that returns with the state of a login
+// already accepted: the back button, or a callback forged from the
+// authorization URL. Nothing is exchanged nor accepted, whoever signed in at
+// the provider this time: the read of the used challenge says where the flow
+// went (410 and redirect_to, from Hydra as from the dispatcher), and the user
+// follows it.
+func (s *Server) callbackReplayed(w http.ResponseWriter, r *http.Request, fs *flowstate.FlowState) {
+	if _, err := s.Hydra.GetLoginRequest(r.Context(), fs.LoginChallenge); err != nil {
+		s.hydraFailed(w, r, "callback replayed", err)
+		return
+	}
+	// The challenge is still open, though this browser was accepted on it.
+	s.errorRedirect(w, r, http.StatusBadRequest, "login already completed", nil)
 }
 
 // failAfterProvider answers a login that fails once the provider has signed

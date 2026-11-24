@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -111,7 +112,14 @@ func (j *journey) get(target string) *httptest.ResponseRecorder {
 	}
 	rec := httptest.NewRecorder()
 	j.s.Routes().ServeHTTP(rec, req)
-	j.cookies = append(j.cookies, rec.Result().Cookies()...)
+	// As a browser: a cookie set again replaces the one of the same name, and
+	// a cleared one is dropped.
+	for _, c := range rec.Result().Cookies() {
+		j.cookies = slices.DeleteFunc(j.cookies, func(old *http.Cookie) bool { return old.Name == c.Name })
+		if c.MaxAge >= 0 {
+			j.cookies = append(j.cookies, c)
+		}
+	}
 	return rec
 }
 
@@ -327,20 +335,63 @@ func TestCallbackErrorPage(t *testing.T) {
 }
 
 // The browser's back button returns to the provider, which sends a new code
-// with the same state: the accept of a challenge already used answers where
-// the flow went, and the user follows.
+// with the same state, perhaps for another account. Nothing is exchanged nor
+// accepted again, the session stays the first one's, and the read of the used
+// challenge says where the flow went.
 func TestCallbackReplayed(t *testing.T) {
 	j := startLogin(t, func(cfg *config.Config, _ *oidctest.Provider) { cfg.RedirectOnErrorURL = errorPage })
 	j.provider(j.idToken(nil), userinfoOf("user-123"))
 	if rec := j.callback(); rec.Header().Get("Location") != "https://hydra/after-login" {
 		t.Fatalf("first callback: %d %q", rec.Code, rec.Header().Get("Location"))
 	}
+	tokens := j.idp.Hit("/token")
 
-	j.fh.errs["accept login"] = goneTo
+	// The provider now answers for someone else.
+	j.provider(j.idToken(func(c map[string]any) { c["sub"] = "bob" }), userinfoOf("bob"))
+	j.fh.errs["get login"] = goneTo
 	rec := j.callback()
 
 	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != backToClient {
 		t.Errorf("replayed callback: %d %q, want the redirect_to of the 410", rec.Code, rec.Header().Get("Location"))
+	}
+	if j.idp.Hit("/token") != tokens {
+		t.Errorf("the replayed callback must not exchange the code")
+	}
+	if len(j.fh.loginAccepted) != 1 || j.fh.acceptLogin.Subject != "user-123" {
+		t.Errorf("accepted = %v, subject %q: nothing more must be accepted", j.fh.loginAccepted, j.fh.acceptLogin.Subject)
+	}
+	if c := setCookie(rec, "oidc_session"); c != nil {
+		t.Errorf("the session must stay the first one's")
+	}
+
+	// The challenge unknown, or still open: an error, never a second login.
+	for name, err := range map[string]error{"unknown": gone, "still open": nil} {
+		j.fh.errs["get login"] = err
+		rec := j.callback()
+		if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, errorPage+"?") || len(j.fh.loginAccepted) != 1 {
+			t.Errorf("%s: %d %q, accepted %v", name, rec.Code, loc, j.fh.loginAccepted)
+		}
+	}
+}
+
+// Hydra refuses the accept (it answers 409 to an accept replayed): no session
+// of the provider is kept for a login that did not go through.
+func TestCallbackAcceptRefusedKeepsNoSession(t *testing.T) {
+	j := startLogin(t, nil)
+	j.provider(j.idToken(nil), userinfoOf("user-123"))
+	j.fh.errs["accept login"] = errors.New("409 conflict")
+
+	rec := j.callback()
+
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", rec.Code)
+	}
+	if c := setCookie(rec, "oidc_session"); c != nil {
+		t.Errorf("no session must be kept: %+v", c)
+	}
+	// The flow is not marked done: the user may come back with a new code.
+	if c := setCookie(rec, "oidc_flow"); c != nil {
+		t.Errorf("the flow cookie must be left as it is: %+v", c)
 	}
 }
 

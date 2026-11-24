@@ -24,12 +24,15 @@ const (
 	logoutCookie  = "oidc_logout"
 )
 
-// FlowState is stashed at /login and read back at the callback.
+// FlowState is stashed at /login and read back at the callback. Once the
+// login is accepted it is replaced by its mark, Done, with the state and the
+// challenge alone: a callback that comes back with that state is a replay.
 type FlowState struct {
 	State          string
 	Nonce          string
 	Verifier       string // PKCE code_verifier ("" when PKCE disabled)
 	LoginChallenge string
+	Done           bool
 }
 
 // LogoutState is stashed before the provider's logout and read back at the
