@@ -6,7 +6,6 @@ package httpx
 
 import (
 	"log/slog"
-	"net"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -21,14 +20,13 @@ import (
 	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/upstream"
 )
 
-// Route paths. The callback and logout-callback paths are also used (prefixed
-// with BASE_URL) as the upstream redirect_uri / post_logout_redirect_uri.
+// Route paths. The returns from the provider are served at CALLBACK_PATH and
+// LOGOUT_CALLBACK_PATH, which (prefixed with BASE_URL) are also the upstream
+// redirect_uri and post_logout_redirect_uri.
 const (
-	LoginPath          = "/login"
-	CallbackPath       = "/callback"
-	ConsentPath        = "/consent"
-	LogoutPath         = "/logout"
-	LogoutCallbackPath = "/logout/callback"
+	LoginPath   = "/login"
+	ConsentPath = "/consent"
+	LogoutPath  = "/logout"
 )
 
 // Deps are the collaborators a Server needs.
@@ -45,7 +43,6 @@ type Deps struct {
 // Server holds the HTTP handlers and their dependencies.
 type Server struct {
 	Deps
-	trustedProxies []*net.IPNet
 }
 
 // New builds a Server.
@@ -56,26 +53,22 @@ func New(d Deps) *Server {
 	if d.Metrics == nil {
 		d.Metrics = metrics.New(prometheus.NewRegistry())
 	}
-	return &Server{
-		Deps:           d,
-		trustedProxies: parseTrustedProxies(d.Config.TrustedProxies),
-	}
+	return &Server{Deps: d}
 }
 
 // Routes returns the configured router.
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
-	r.Use(s.realIP)
 	r.Use(s.Metrics.Middleware)
 
 	r.Get("/health", s.health)
 	r.Handle("/metrics", s.Metrics.Handler())
 	r.Get(LoginPath, s.login)
-	r.Get(CallbackPath, s.callback)
+	r.Get(s.Config.CallbackPath, s.callback)
 	r.Get(ConsentPath, s.consent)
 	r.Get(LogoutPath, s.logout)
-	r.Get(LogoutCallbackPath, s.logoutCallback)
+	r.Get(s.Config.LogoutCallbackPath, s.logoutCallback)
 	return r
 }
 

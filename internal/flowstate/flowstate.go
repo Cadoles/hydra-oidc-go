@@ -32,10 +32,15 @@ type FlowState struct {
 	LoginChallenge string
 }
 
-// LogoutState is stashed at /logout and read back at the logout callback.
+// LogoutState is stashed before the provider's logout and read back at the
+// logout callback. A logout Hydra asked for carries its LogoutChallenge; one
+// that follows a failed login (UPSTREAM_LOGOUT_ON_ERROR) carries the error to
+// show once the provider's session is ended, and no challenge.
 type LogoutState struct {
 	LogoutChallenge string
 	State           string
+	ErrorStatus     int
+	ErrorMessage    string
 }
 
 // Store is the optional backend for the upstream id_token (Redis in prod).

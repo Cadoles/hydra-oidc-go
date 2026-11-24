@@ -533,3 +533,183 @@ func TestSameToken(t *testing.T) {
 		}
 	}
 }
+
+// CALLBACK_PATH and LOGOUT_CALLBACK_PATH: the app serves them, sends them to
+// the provider, and no longer serves the defaults.
+func TestConfiguredReturnPaths(t *testing.T) {
+	paths := func(cfg *config.Config, _ *oidctest.Provider) {
+		cfg.CallbackPath = "/connect/oidc/check"
+		cfg.LogoutCallbackPath = "/logout-done"
+		cfg.OIDCLogoutEndpoint = "https://idp.test/logout?%s"
+	}
+	j := startLogin(t, paths)
+	j.provider(j.idToken(nil), userinfoOf("user-123"))
+
+	if rec := j.get("/callback?code=good-code&state=" + url.QueryEscape(j.state)); rec.Code != http.StatusNotFound {
+		t.Errorf("the default callback must not be served: %d", rec.Code)
+	}
+	rec := j.get("/connect/oidc/check?code=good-code&state=" + url.QueryEscape(j.state))
+	if rec.Code != http.StatusSeeOther || len(j.fh.loginAccepted) != 1 {
+		t.Fatalf("callback: %d, accepted %v, body %q", rec.Code, j.fh.loginAccepted, rec.Body)
+	}
+	if got := j.idp.Form().Get("redirect_uri"); got != "https://app.test/connect/oidc/check" {
+		t.Errorf("redirect_uri = %q", got)
+	}
+
+	rec = j.get("/logout?logout_challenge=logout-1")
+	end, _ := url.Parse(rec.Header().Get("Location"))
+	if got := end.Query().Get("post_logout_redirect_uri"); got != "https://app.test/logout-done" {
+		t.Fatalf("post_logout_redirect_uri = %q (%d %q)", got, rec.Code, end)
+	}
+	if rec := j.get("/logout/callback?state=" + url.QueryEscape(end.Query().Get("state"))); rec.Code != http.StatusNotFound {
+		t.Errorf("the default logout callback must not be served: %d", rec.Code)
+	}
+	rec = j.get("/logout-done?state=" + url.QueryEscape(end.Query().Get("state")))
+	if rec.Code != http.StatusSeeOther || j.fh.logoutAccepted != "logout-1" {
+		t.Errorf("logout callback: %d, accepted %q", rec.Code, j.fh.logoutAccepted)
+	}
+}
+
+// UPSTREAM_LOGOUT_ON_ERROR: a login that fails after the provider answered
+// first ends the provider's session, then shows the error.
+func TestUpstreamLogoutOnError(t *testing.T) {
+	on := func(cfg *config.Config, _ *oidctest.Provider) {
+		cfg.UpstreamLogoutOnError = true
+		cfg.OIDCLogoutEndpoint = "https://idp.test/logout?%s"
+		cfg.RedirectOnErrorURL = errorPage
+	}
+	cases := []struct {
+		name    string
+		prepare func(j *journey)
+		status  string
+		hint    bool // the id_token is the one of the token response
+	}{
+		{"the userinfo of another sub", func(j *journey) {
+			j.provider(j.idToken(nil), userinfoOf("someone-else"))
+		}, "403", true},
+		{"the userinfo fails", func(j *journey) {
+			j.provider(j.idToken(nil), nil)
+			j.idp.Set(func(p *oidctest.Provider) {
+				p.UserInfo = func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) }
+			})
+		}, "502", true},
+		{"another nonce", func(j *journey) {
+			j.provider(j.idToken(func(c map[string]any) { c["nonce"] = "replayed" }), userinfoOf("user-123"))
+		}, "403", true},
+		{"hydra refuses the accept", func(j *journey) {
+			j.provider(j.idToken(nil), userinfoOf("user-123"))
+			j.fh.errs["accept login"] = errors.New("boom")
+		}, "502", true},
+		{"the challenge unknown to hydra", func(j *journey) {
+			j.provider(j.idToken(nil), userinfoOf("user-123"))
+			j.fh.errs["accept login"] = gone
+		}, "410", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			j := startLogin(t, on)
+			tc.prepare(j)
+
+			rec := j.callback()
+
+			end, _ := url.Parse(rec.Header().Get("Location"))
+			if rec.Code != http.StatusSeeOther || !strings.HasPrefix(end.String(), "https://idp.test/logout?") {
+				t.Fatalf("callback: %d %q, want the provider's logout", rec.Code, end)
+			}
+			q := end.Query()
+			if q.Get("id_token_hint") == "" || q.Get("state") == "" || q.Get("post_logout_redirect_uri") != "https://app.test/logout/callback" {
+				t.Errorf("logout request = %v", q)
+			}
+			if len(j.fh.loginAccepted) != 0 {
+				t.Errorf("the login must not be accepted")
+			}
+
+			// Another state: no error page of ours, and nothing accepted.
+			if rec := j.get("/logout/callback?state=forged"); !strings.Contains(rec.Header().Get("Location"), "status_code=403") {
+				t.Errorf("forged return: %d %q", rec.Code, rec.Header().Get("Location"))
+			}
+			rec = j.get("/logout/callback?state=" + url.QueryEscape(q.Get("state")))
+			page, _ := url.Parse(rec.Header().Get("Location"))
+			if !strings.HasPrefix(page.String(), errorPage+"?") || page.Query().Get("status_code") != tc.status {
+				t.Errorf("return: %d %q, want the error page with status %s", rec.Code, page, tc.status)
+			}
+			if j.fh.logoutAccepted != "" {
+				t.Errorf("no logout of hydra is to accept: %q", j.fh.logoutAccepted)
+			}
+			if c := setCookie(rec, "oidc_logout"); c == nil || c.MaxAge >= 0 {
+				t.Errorf("oidc_logout must be cleared: %+v", c)
+			}
+		})
+	}
+}
+
+// The option off, without a provider logout, before the provider answered, or
+// for a flow that already went on: the error at once, no logout.
+func TestUpstreamLogoutOnErrorNotUsed(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(cfg *config.Config)
+		prepare func(j *journey) string
+		want    string // prefix of the Location
+	}{
+		{"the option off", func(cfg *config.Config) { cfg.UpstreamLogoutOnError = false }, func(j *journey) string {
+			j.provider(j.idToken(nil), userinfoOf("someone-else"))
+			return ""
+		}, errorPage},
+		{"no logout endpoint", func(cfg *config.Config) { cfg.OIDCLogoutEndpoint = "" }, func(j *journey) string {
+			j.provider(j.idToken(nil), userinfoOf("someone-else"))
+			return ""
+		}, errorPage},
+		{"the code refused", nil, func(j *journey) string {
+			j.idp.Set(func(p *oidctest.Provider) { p.TokenStatus = http.StatusBadRequest })
+			return ""
+		}, errorPage},
+		{"another state", nil, func(j *journey) string {
+			j.provider(j.idToken(nil), userinfoOf("user-123"))
+			return "/callback?code=good-code&state=forged"
+		}, errorPage},
+		{"the flow already went on", nil, func(j *journey) string {
+			j.provider(j.idToken(nil), userinfoOf("user-123"))
+			j.fh.errs["accept login"] = goneTo
+			return ""
+		}, backToClient},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			j := startLogin(t, func(cfg *config.Config, _ *oidctest.Provider) {
+				cfg.UpstreamLogoutOnError = true
+				cfg.OIDCLogoutEndpoint = "https://idp.test/logout?%s"
+				cfg.RedirectOnErrorURL = errorPage
+				if tc.mutate != nil {
+					tc.mutate(cfg)
+				}
+			})
+			target := tc.prepare(j)
+			if target == "" {
+				target = "/callback?code=good-code&state=" + url.QueryEscape(j.state)
+			}
+
+			rec := j.get(target)
+
+			if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, tc.want) {
+				t.Errorf("Location = %q, want %q", loc, tc.want)
+			}
+		})
+	}
+}
+
+// An id_token too large for the session cookie: the user is signed in all the
+// same, and the logout will go without the provider.
+func TestCallbackIDTokenTooLargeForTheCookie(t *testing.T) {
+	j := startLogin(t, nil)
+	j.provider(j.idToken(func(c map[string]any) { c["groups"] = strings.Repeat("g", 4000) }), userinfoOf("user-123"))
+
+	rec := j.callback()
+
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "https://hydra/after-login" || len(j.fh.loginAccepted) != 1 {
+		t.Fatalf("callback: %d %q, accepted %v", rec.Code, rec.Header().Get("Location"), j.fh.loginAccepted)
+	}
+	if c := setCookie(rec, "oidc_session"); c != nil {
+		t.Errorf("no session cookie expected: %d bytes", len(c.Value))
+	}
+}

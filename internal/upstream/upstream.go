@@ -162,14 +162,21 @@ func (c *Client) Exchange(ctx context.Context, code, pkceVerifier string) (*oaut
 	return c.oauth.Exchange(ctx, code, opts...)
 }
 
+// RawIDToken returns the id_token of a token response, not verified, or "".
+// It is only good to hand back to the provider, as its id_token_hint.
+func RawIDToken(tok *oauth2.Token) string {
+	raw, _ := tok.Extra("id_token").(string)
+	return raw
+}
+
 // VerifyIDToken extracts and verifies the id_token from the token response. It
 // checks signature (unless disabled), audience, expiry, and the nonce. It
 // returns the raw id_token (for use as id_token_hint at logout), the verified
 // subject, and the full claim set.
 func (c *Client) VerifyIDToken(ctx context.Context, tok *oauth2.Token, expectedNonce string) (rawIDToken, subject string, claims map[string]any, err error) {
 	ctx = oidc.ClientContext(ctx, c.httpClient)
-	raw, ok := tok.Extra("id_token").(string)
-	if !ok || raw == "" {
+	raw := RawIDToken(tok)
+	if raw == "" {
 		return "", "", nil, fmt.Errorf("no id_token in token response")
 	}
 	idt, err := c.verifier.Verify(ctx, raw)

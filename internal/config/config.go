@@ -6,6 +6,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -21,6 +22,15 @@ type Config struct {
 	// CookiePath scopes the flow cookies (set to the external sub-path, e.g.
 	// /auth/oidc, when served behind a prefix).
 	CookiePath string `env:"COOKIE_PATH" envDefault:"/"`
+	// CallbackPath and LogoutCallbackPath are where the app serves the return
+	// from the provider's login and logout. The provider is sent BASE_URL
+	// followed by the path, and refuses a URL it was not declared: these let
+	// the app take over the URLs already declared for another one.
+	CallbackPath       string `env:"CALLBACK_PATH" envDefault:"/callback"`
+	LogoutCallbackPath string `env:"LOGOUT_CALLBACK_PATH" envDefault:"/logout/callback"`
+
+	// Logging. LOG_LEVEL sets the slog level: debug, info, warn, error.
+	LogLevel string `env:"LOG_LEVEL" envDefault:"info"`
 
 	// Ory Hydra admin API. HydraAPIPathPrefix replaces the SDK's "/admin" path
 	// segment: keep "/admin" for a real Hydra v2 admin API, or set it to ""
@@ -32,7 +42,7 @@ type Config struct {
 
 	// Upstream OIDC provider (the IdP this app bridges to).
 	OIDCIssuer            string `env:"OIDC_ISSUER"` // optional: enables discovery
-	OIDCAuthorizeEndpoint string `env:"OIC_AUTHORIZE_ENDPOINT"`
+	OIDCAuthorizeEndpoint string `env:"OIDC_AUTHORIZE_ENDPOINT"`
 	OIDCTokenEndpoint     string `env:"OIDC_TOKEN_ENDPOINT"`
 	OIDCUserinfoEndpoint  string `env:"OIDC_USERINFO_ENDPOINT"`
 	OIDCJWKSEndpoint      string `env:"OIDC_JWKS_ENDPOINT"`
@@ -65,9 +75,14 @@ type Config struct {
 	AuthAMR             []string          `env:"-"`
 	AuthACR             string            `env:"AUTH_ACR"`
 
-	// Redirects
-	PostLogoutRedirectURL string `env:"POST_LOGOUT_REDIRECT_URL"`
-	RedirectOnErrorURL    string `env:"REDIRECT_ON_ERROR_URL"`
+	// RedirectOnErrorURL is where an error is shown, with ?status_code and
+	// ?message; empty, the app answers a plain status.
+	RedirectOnErrorURL string `env:"REDIRECT_ON_ERROR_URL"`
+	// UpstreamLogoutOnError ends the provider's session before the error is
+	// shown, when a login fails after the provider answered: the next attempt
+	// then asks the provider for the identity again, instead of failing the
+	// same way with the same one.
+	UpstreamLogoutOnError bool `env:"UPSTREAM_LOGOUT_ON_ERROR" envDefault:"false"`
 
 	// Optional Redis — used ONLY to hold the upstream id_token between login and
 	// a (possibly much later) logout, keyed by an opaque session id. When unset,
@@ -83,8 +98,7 @@ type Config struct {
 	SentryDSN         string `env:"SENTRY_DSN"`
 	SentryEnvironment string `env:"SENTRY_ENVIRONMENT"`
 
-	TrustedProxies []string `env:"TRUSTED_PROXIES" envSeparator:","`
-	Version        string   `env:"VERSION"`
+	Version string `env:"VERSION"`
 }
 
 // Load reads and validates configuration from the environment.
@@ -158,7 +172,7 @@ func Load() (*Config, error) {
 func (c *Config) Validate() error {
 	// Either discovery (issuer) or the explicit authorize+token endpoints.
 	if c.OIDCIssuer == "" && (c.OIDCAuthorizeEndpoint == "" || c.OIDCTokenEndpoint == "") {
-		return fmt.Errorf("set OIDC_ISSUER (discovery) or both OIC_AUTHORIZE_ENDPOINT and OIDC_TOKEN_ENDPOINT")
+		return fmt.Errorf("set OIDC_ISSUER (discovery) or both OIDC_AUTHORIZE_ENDPOINT and OIDC_TOKEN_ENDPOINT")
 	}
 	// JWKS is needed to verify id_token signatures unless discovery provides it
 	// or verification is explicitly disabled.
@@ -170,10 +184,64 @@ func (c *Config) Validate() error {
 	if c.RedisTTL < time.Second {
 		return fmt.Errorf("HYDRA_OIDC_REDIS_TTL must be at least one second")
 	}
+	if _, ok := parseSlogLevel(c.LogLevel); !ok {
+		return fmt.Errorf("LOG_LEVEL %q is invalid (allowed: debug, info, warn, error)", c.LogLevel)
+	}
+	for name, p := range map[string]string{"CALLBACK_PATH": c.CallbackPath, "LOGOUT_CALLBACK_PATH": c.LogoutCallbackPath} {
+		if err := validRoute(p); err != nil {
+			return fmt.Errorf("%s %q: %w", name, p, err)
+		}
+	}
+	if c.CallbackPath == c.LogoutCallbackPath {
+		return fmt.Errorf("CALLBACK_PATH and LOGOUT_CALLBACK_PATH must differ")
+	}
 	if len(c.AppSecret) < 16 {
 		return fmt.Errorf("APP_SECRET must be at least 16 bytes")
 	}
 	return nil
+}
+
+// reservedRoutes are the paths the app serves itself.
+var reservedRoutes = []string{"/login", "/consent", "/logout", "/health", "/metrics"}
+
+// validRoute checks a configurable path: absolute, literal (the router would
+// read braces and stars as patterns), and not one of the app's own.
+func validRoute(p string) error {
+	if !strings.HasPrefix(p, "/") || p == "/" {
+		return fmt.Errorf("must be a path starting with / and not / alone")
+	}
+	if strings.ContainsAny(p, "{}*?# \t") {
+		return fmt.Errorf("must be a literal path, without query, fragment, space nor pattern")
+	}
+	for _, r := range reservedRoutes {
+		if p == r {
+			return fmt.Errorf("is a path of the app")
+		}
+	}
+	return nil
+}
+
+// SlogLevel returns the level LOG_LEVEL names; Validate has refused an
+// unknown one.
+func (c *Config) SlogLevel() slog.Level {
+	lvl, _ := parseSlogLevel(c.LogLevel)
+	return lvl
+}
+
+// parseSlogLevel maps a name to an slog.Level; empty is info, the default.
+func parseSlogLevel(s string) (slog.Level, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "info":
+		return slog.LevelInfo, true
+	case "debug":
+		return slog.LevelDebug, true
+	case "warn", "warning":
+		return slog.LevelWarn, true
+	case "error":
+		return slog.LevelError, true
+	default:
+		return slog.LevelInfo, false
+	}
 }
 
 // HTTPS reports whether the public BaseURL is https (used to mark cookies Secure).

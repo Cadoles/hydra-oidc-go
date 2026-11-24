@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"log/slog"
+	"testing"
+)
 
 func baseEnv(t *testing.T) {
 	t.Helper()
@@ -13,7 +16,7 @@ func baseEnv(t *testing.T) {
 
 func TestLoadExplicitEndpoints(t *testing.T) {
 	baseEnv(t)
-	t.Setenv("OIC_AUTHORIZE_ENDPOINT", "https://idp/authorize")
+	t.Setenv("OIDC_AUTHORIZE_ENDPOINT", "https://idp/authorize")
 	t.Setenv("OIDC_TOKEN_ENDPOINT", "https://idp/token")
 	t.Setenv("OIDC_JWKS_ENDPOINT", "https://idp/jwks")
 	t.Setenv("OIDC_SCOPE", "openid identite_pivot email")
@@ -44,7 +47,7 @@ func TestLoadExplicitEndpoints(t *testing.T) {
 func TestLoadScopesDefault(t *testing.T) {
 	baseEnv(t)
 	t.Setenv("OIDC_ISSUER", "") // use explicit, but provide them
-	t.Setenv("OIC_AUTHORIZE_ENDPOINT", "https://idp/authorize")
+	t.Setenv("OIDC_AUTHORIZE_ENDPOINT", "https://idp/authorize")
 	t.Setenv("OIDC_TOKEN_ENDPOINT", "https://idp/token")
 	t.Setenv("OIDC_JWKS_ENDPOINT", "https://idp/jwks")
 
@@ -67,7 +70,7 @@ func TestValidateRequiresIssuerOrEndpoints(t *testing.T) {
 
 func TestValidateRequiresJWKSWhenVerifying(t *testing.T) {
 	baseEnv(t)
-	t.Setenv("OIC_AUTHORIZE_ENDPOINT", "https://idp/authorize")
+	t.Setenv("OIDC_AUTHORIZE_ENDPOINT", "https://idp/authorize")
 	t.Setenv("OIDC_TOKEN_ENDPOINT", "https://idp/token")
 	// VerifySignature defaults true, no issuer, no JWKS → invalid.
 	if _, err := Load(); err == nil {
@@ -94,6 +97,60 @@ func TestValidateSessionLifetime(t *testing.T) {
 			}
 			if ok && cfg.RedisTTL.Seconds() < 1 {
 				t.Errorf("RedisTTL = %v", cfg.RedisTTL)
+			}
+		})
+	}
+}
+
+func TestLoadOptions(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("OIDC_ISSUER", "https://idp")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.CallbackPath != "/callback" || cfg.LogoutCallbackPath != "/logout/callback" || cfg.UpstreamLogoutOnError || cfg.SlogLevel() != slog.LevelInfo {
+		t.Errorf("defaults: %q %q %v %v", cfg.CallbackPath, cfg.LogoutCallbackPath, cfg.UpstreamLogoutOnError, cfg.SlogLevel())
+	}
+
+	t.Setenv("CALLBACK_PATH", "/connect/oidc/check")
+	t.Setenv("LOGOUT_CALLBACK_PATH", "/logout-done")
+	t.Setenv("UPSTREAM_LOGOUT_ON_ERROR", "true")
+	t.Setenv("LOG_LEVEL", "Debug")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.CallbackPath != "/connect/oidc/check" || cfg.LogoutCallbackPath != "/logout-done" || !cfg.UpstreamLogoutOnError || cfg.SlogLevel() != slog.LevelDebug {
+		t.Errorf("set: %q %q %v %v", cfg.CallbackPath, cfg.LogoutCallbackPath, cfg.UpstreamLogoutOnError, cfg.SlogLevel())
+	}
+}
+
+func TestValidateOptions(t *testing.T) {
+	for name, env := range map[string][2]string{
+		"relative callback":      {"CALLBACK_PATH", "callback"},
+		"root":                   {"CALLBACK_PATH", "/"},
+		"a pattern":              {"CALLBACK_PATH", "/cb/{id}"},
+		"a wildcard":             {"LOGOUT_CALLBACK_PATH", "/cb/*"},
+		"a query":                {"CALLBACK_PATH", "/cb?x=1"},
+		"a path of the app":      {"CALLBACK_PATH", "/login"},
+		"the logout of the app":  {"LOGOUT_CALLBACK_PATH", "/logout"},
+		"both returns the same":  {"LOGOUT_CALLBACK_PATH", "/callback"},
+		"an unknown log level":   {"LOG_LEVEL", "verbose"},
+		"the former name, alone": {"OIC_AUTHORIZE_ENDPOINT", "https://idp/authorize"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			baseEnv(t)
+			if env[0] != "OIC_AUTHORIZE_ENDPOINT" {
+				t.Setenv("OIDC_ISSUER", "https://idp")
+			} else {
+				t.Setenv("OIDC_TOKEN_ENDPOINT", "https://idp/token")
+				t.Setenv("OIDC_JWKS_ENDPOINT", "https://idp/jwks")
+			}
+			t.Setenv(env[0], env[1])
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s=%q: expected an error", env[0], env[1])
 			}
 		})
 	}

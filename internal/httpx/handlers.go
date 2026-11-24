@@ -38,6 +38,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		s.hydraFailed(w, r, "could not fetch login request", err)
 		return
 	}
+	s.Logger.Debug("login request", "challenge", challenge, "skip", lr.Skip)
 
 	// Hydra can skip when it already has an authenticated session for the
 	// subject. We have no fresh claims here; accept with the subject only.
@@ -51,6 +52,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			s.hydraFailed(w, r, "could not accept (skip) login", err)
 			return
 		}
+		s.Logger.Info("login accepted, skipped by hydra", "challenge", challenge, "subject", lr.Subject)
 		http.Redirect(w, r, redirect, http.StatusSeeOther)
 		return
 	}
@@ -71,10 +73,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.Logger.Debug("redirecting to the provider", "challenge", challenge)
 	http.Redirect(w, r, s.Upstream.AuthCodeURL(state, nonce, verifier), http.StatusSeeOther)
 }
 
-// callback handles GET /callback: the upstream redirect_uri. It validates the
+// callback handles GET CALLBACK_PATH: the upstream redirect_uri. It validates the
 // round-trip, exchanges the code, verifies the id_token, gathers claims, and
 // accepts the Hydra login.
 func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
@@ -105,13 +108,18 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		s.errorRedirect(w, r, http.StatusBadGateway, "code exchange failed", err)
 		return
 	}
+	// From here the provider has signed the user in: a failure may end its
+	// session before the error is shown (UPSTREAM_LOGOUT_ON_ERROR). The
+	// id_token goes back to the provider as a hint, verified or not.
+	hint := upstream.RawIDToken(tok)
 
 	rawIDToken, subject, idClaims, err := s.Upstream.VerifyIDToken(r.Context(), tok, fs.Nonce)
 	if err != nil {
 		s.Metrics.LoginOutcome(metrics.LoginInvalid)
-		s.errorRedirect(w, r, http.StatusForbidden, "id_token verification failed", err)
+		s.failAfterProvider(w, r, hint, http.StatusForbidden, "id_token verification failed", err)
 		return
 	}
+	s.Logger.Debug("id_token verified", "challenge", fs.LoginChallenge, "subject", subject)
 
 	// Carry the upstream acr through if the provider sent one (used as the Hydra
 	// acr unless an explicit AUTH_ACR is configured).
@@ -132,12 +140,12 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	ui, err := s.Upstream.UserInfo(r.Context(), tok, subject)
 	if errors.Is(err, upstream.ErrUserInfoInvalid) {
 		s.Metrics.LoginOutcome(metrics.LoginInvalid)
-		s.errorRedirect(w, r, http.StatusForbidden, "userinfo verification failed", err)
+		s.failAfterProvider(w, r, hint, http.StatusForbidden, "userinfo verification failed", err)
 		return
 	}
 	if err != nil {
 		s.Metrics.LoginOutcome(metrics.LoginTechnical)
-		s.errorRedirect(w, r, http.StatusBadGateway, "userinfo fetch failed", err)
+		s.failAfterProvider(w, r, hint, http.StatusBadGateway, "userinfo fetch failed", err)
 		return
 	}
 	for k, v := range ui {
@@ -145,28 +153,64 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	}
 	sanitizeClaims(claims)
 
-	// Persist the upstream id_token for RP-initiated logout (id_token_hint).
-	if err := s.Flow.SetSession(r.Context(), w, rawIDToken); err != nil {
-		s.errorRedirect(w, r, http.StatusInternalServerError, "could not persist session", err)
-		return
-	}
-
 	redirect, err := s.Hydra.AcceptLogin(r.Context(), fs.LoginChallenge, hydra.LoginAccept{
 		Subject: subject,
 		Context: claims,
 		AMR:     s.Config.AuthAMR,
 		ACR:     acr,
 	})
-	if err != nil {
-		s.hydraFailed(w, r, "could not accept login", err)
+	if to := hydra.RedirectTo(err); to != "" {
+		// The flow already went on (back button, double click): the user
+		// follows it, signed in at the provider as before.
+		s.Logger.Info("challenge no longer valid, following redirect_to", "op", "accept login")
+		http.Redirect(w, r, to, http.StatusSeeOther)
 		return
+	}
+	if err != nil {
+		s.Metrics.LoginOutcome(metrics.LoginTechnical)
+		status, msg := http.StatusBadGateway, "could not accept login"
+		if errors.Is(err, hydra.ErrChallengeNotFound) {
+			status, msg = http.StatusGone, "challenge expired or unknown"
+		}
+		s.failAfterProvider(w, r, hint, status, msg, err)
+		return
+	}
+
+	// Persist the upstream id_token for RP-initiated logout (id_token_hint),
+	// once Hydra has the login: a session is kept for an accepted login only.
+	if err := s.Flow.SetSession(r.Context(), w, rawIDToken); err != nil {
+		// The user is signed in; only the logout will not reach the provider.
+		s.Logger.Error("could not persist the upstream session: the logout will not go through the provider", "err", err)
+		s.Reporter.Capture(err)
 	}
 	// The flow cookie is kept until it expires: the browser's back button
 	// returns to the provider, which sends a new code with the same state.
 	// The accept then answers where the finished flow went, instead of an
 	// error for a missing cookie.
 	s.Metrics.LoginOutcome(metrics.LoginSuccess)
+	s.Logger.Info("login accepted", "challenge", fs.LoginChallenge, "subject", subject)
 	http.Redirect(w, r, redirect, http.StatusSeeOther)
+}
+
+// failAfterProvider answers a login that fails once the provider has signed
+// the user in. With UPSTREAM_LOGOUT_ON_ERROR, and a provider logout to go to,
+// the browser first ends the provider's session: the error is shown at the
+// return (logoutCallback), and the next attempt asks for the identity again.
+// Otherwise the error is shown at once.
+func (s *Server) failAfterProvider(w http.ResponseWriter, r *http.Request, idTokenHint string, status int, msg string, err error) {
+	if !s.Config.UpstreamLogoutOnError || idTokenHint == "" || !s.Upstream.CanLogout() {
+		s.errorRedirect(w, r, status, msg, err)
+		return
+	}
+	s.logError(status, msg, err)
+	state := flowstate.RandString(24)
+	if err := s.Flow.SetLogout(w, flowstate.LogoutState{State: state, ErrorStatus: status, ErrorMessage: msg}); err != nil {
+		s.Logger.Error("could not set logout state", "err", err)
+		s.sendError(w, r, status, msg)
+		return
+	}
+	s.Logger.Info("ending the provider's session before the error")
+	http.Redirect(w, r, s.Upstream.LogoutURL(idTokenHint, state, s.Config.BaseURL+s.Config.LogoutCallbackPath), http.StatusSeeOther)
 }
 
 // consent handles GET /consent: auto-accepts (the bridge has no consent UI),
@@ -196,6 +240,7 @@ func (s *Server) consent(w http.ResponseWriter, r *http.Request) {
 		idToken = oidc.FilterClaims(claims, cr.RequestedScope, s.Config.ClaimScopes)
 	}
 
+	s.Logger.Debug("consent request", "challenge", challenge, "skip", cr.Skip, "scopes", cr.RequestedScope)
 	redirect, err := s.Hydra.AcceptConsent(r.Context(), challenge, hydra.ConsentAccept{
 		GrantScope:    cr.RequestedScope,
 		GrantAudience: cr.RequestedAccessTokenAudience,
@@ -207,6 +252,7 @@ func (s *Server) consent(w http.ResponseWriter, r *http.Request) {
 		s.hydraFailed(w, r, "could not accept consent", err)
 		return
 	}
+	s.Logger.Info("consent accepted", "challenge", challenge, "subject", cr.Subject)
 	http.Redirect(w, r, redirect, http.StatusSeeOther)
 }
 
@@ -226,7 +272,8 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 			s.errorRedirect(w, r, http.StatusInternalServerError, "could not set logout state", err)
 			return
 		}
-		postLogout := s.Config.BaseURL + LogoutCallbackPath
+		postLogout := s.Config.BaseURL + s.Config.LogoutCallbackPath
+		s.Logger.Debug("logout through the provider", "challenge", challenge)
 		http.Redirect(w, r, s.Upstream.LogoutURL(idToken, state, postLogout), http.StatusSeeOther)
 		return
 	}
@@ -238,10 +285,11 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Flow.ClearSession(r.Context(), w, r)
+	s.Logger.Info("logout accepted, without the provider", "challenge", challenge)
 	http.Redirect(w, r, redirect, http.StatusSeeOther)
 }
 
-// logoutCallback handles GET /logout/callback: the upstream post-logout
+// logoutCallback handles GET LOGOUT_CALLBACK_PATH: the upstream post-logout
 // redirect. It accepts the Hydra logout and clears all cookies. The state the
 // provider returns must be the one sent to it: otherwise another site could
 // end a logout the user left open at the provider.
@@ -255,6 +303,14 @@ func (s *Server) logoutCallback(w http.ResponseWriter, r *http.Request) {
 		s.errorRedirect(w, r, http.StatusForbidden, "logout state mismatch", nil)
 		return
 	}
+	if ls.LogoutChallenge == "" {
+		// The logout that follows a failed login (failAfterProvider): the
+		// provider's session is ended, the error is shown. Already logged.
+		s.Flow.ClearLogout(w)
+		s.Flow.ClearSession(r.Context(), w, r)
+		s.sendError(w, r, ls.ErrorStatus, ls.ErrorMessage)
+		return
+	}
 	redirect, err := s.Hydra.AcceptLogout(r.Context(), ls.LogoutChallenge)
 	if err != nil {
 		s.hydraFailed(w, r, "could not accept logout", err)
@@ -262,6 +318,7 @@ func (s *Server) logoutCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Flow.ClearLogout(w)
 	s.Flow.ClearSession(r.Context(), w, r)
+	s.Logger.Info("logout accepted", "challenge", ls.LogoutChallenge)
 	http.Redirect(w, r, redirect, http.StatusSeeOther)
 }
 
@@ -295,20 +352,27 @@ func sameToken(got, want string) bool {
 // errorRedirect logs/reports and either redirects to REDIRECT_ON_ERROR_URL or
 // returns a plain status (when no error URL is configured).
 func (s *Server) errorRedirect(w http.ResponseWriter, r *http.Request, status int, msg string, err error) {
-	if err != nil {
-		s.Logger.Error(msg, "err", err, "status", status)
-		if status >= 500 {
-			s.Reporter.Capture(err)
-		}
-	} else {
+	s.logError(status, msg, err)
+	s.sendError(w, r, status, msg)
+}
+
+func (s *Server) logError(status int, msg string, err error) {
+	if err == nil {
 		s.Logger.Warn(msg, "status", status)
-	}
-	if s.Config.RedirectOnErrorURL == "" {
-		http.Error(w, msg, status)
 		return
 	}
+	s.Logger.Error(msg, "err", err, "status", status)
+	if status >= 500 {
+		s.Reporter.Capture(err)
+	}
+}
+
+func (s *Server) sendError(w http.ResponseWriter, r *http.Request, status int, msg string) {
+	if status < 400 || status > 599 {
+		status = http.StatusInternalServerError
+	}
 	u, perr := url.Parse(s.Config.RedirectOnErrorURL)
-	if perr != nil {
+	if s.Config.RedirectOnErrorURL == "" || perr != nil {
 		http.Error(w, msg, status)
 		return
 	}

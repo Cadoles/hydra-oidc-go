@@ -19,7 +19,7 @@ func newTestClient(t *testing.T, h http.HandlerFunc) *SDKClient {
 		h(w, r)
 	}))
 	t.Cleanup(srv.Close)
-	return New(srv.URL, "/admin", 5*time.Second)
+	return New(srv.URL, "/admin", 5*time.Second, nil)
 }
 
 func TestAPIErrClassification(t *testing.T) {

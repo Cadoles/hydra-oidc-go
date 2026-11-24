@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,17 +29,48 @@ import (
 	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/upstream"
 )
 
-func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	slog.SetDefault(logger)
+// version is the release, set at build time (-ldflags -X main.version=…).
+var version = "dev"
 
-	if err := run(logger); err != nil {
-		logger.Error("fatal", "err", err)
+func main() {
+	// "healthcheck" probes the server of this configuration: the image has no
+	// shell nor curl for its HEALTHCHECK.
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		if err := healthcheck(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if err := run(); err != nil {
+		// The configured logger may not exist yet.
+		slog.New(slog.NewJSONHandler(os.Stdout, nil)).Error("fatal", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(logger *slog.Logger) error {
+// healthcheck asks /health of the server listening on LISTEN_ADDR.
+func healthcheck() error {
+	addr := os.Getenv("LISTEN_ADDR")
+	if addr == "" {
+		addr = ":8080"
+	}
+	if strings.HasPrefix(addr, ":") {
+		addr = "127.0.0.1" + addr
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://" + addr + "/health")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("health: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func run() error {
 	// .env is best-effort for local dev; real env vars always win.
 	_ = godotenv.Load()
 
@@ -46,6 +78,13 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if cfg.Version == "" {
+		cfg.Version = version
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.SlogLevel()}))
+	slog.SetDefault(logger)
+	logger.Info("starting", "version", cfg.Version, "log_level", cfg.SlogLevel().String(),
+		"callback_path", cfg.CallbackPath, "logout_callback_path", cfg.LogoutCallbackPath)
 
 	reporter, flush, err := obs.Init(cfg.SentryDSN, cfg.SentryEnvironment, cfg.Version)
 	if err != nil {
@@ -55,7 +94,7 @@ func run(logger *slog.Logger) error {
 
 	ctx := context.Background()
 
-	upstreamClient, err := upstream.New(ctx, cfg, cfg.BaseURL+httpx.CallbackPath)
+	upstreamClient, err := upstream.New(ctx, cfg, cfg.BaseURL+cfg.CallbackPath)
 	if err != nil {
 		return fmt.Errorf("init upstream oidc: %w", err)
 	}
@@ -74,7 +113,7 @@ func run(logger *slog.Logger) error {
 
 	srvHandler := httpx.New(httpx.Deps{
 		Config:   cfg,
-		Hydra:    hydra.New(cfg.HydraAdminBaseURL, cfg.HydraAPIPathPrefix, 10*time.Second),
+		Hydra:    hydra.New(cfg.HydraAdminBaseURL, cfg.HydraAPIPathPrefix, 10*time.Second, logger),
 		Upstream: upstreamClient,
 		Flow:     flow,
 		Reporter: reporter,

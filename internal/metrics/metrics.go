@@ -16,11 +16,9 @@ import (
 
 // Login outcome label values.
 const (
-	LoginSuccess      = "success"
-	LoginInvalid      = "invalid_credentials"
-	LoginTechnical    = "technical_error"
-	LoginAltchaFailed = "altcha_failed"
-	LoginRateLimited  = "rate_limited"
+	LoginSuccess   = "success"
+	LoginInvalid   = "invalid_credentials"
+	LoginTechnical = "technical_error"
 )
 
 // Metrics holds the registered collectors.

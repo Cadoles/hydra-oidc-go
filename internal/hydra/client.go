@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -108,28 +109,31 @@ type Client interface {
 	AcceptLogin(ctx context.Context, challenge string, accept LoginAccept) (redirectTo string, err error)
 	GetConsentRequest(ctx context.Context, challenge string) (*ConsentRequest, error)
 	AcceptConsent(ctx context.Context, challenge string, accept ConsentAccept) (redirectTo string, err error)
-	RejectConsent(ctx context.Context, challenge, errID, errDesc string) (redirectTo string, err error)
-	GetLogoutRequest(ctx context.Context, challenge string) (resolvedChallenge string, err error)
 	AcceptLogout(ctx context.Context, challenge string) (redirectTo string, err error)
 }
 
 // SDKClient is the production Client backed by the Ory SDK.
 type SDKClient struct {
-	api ory.OAuth2API
+	api    ory.OAuth2API
+	logger *slog.Logger
 }
 
 // New builds an SDKClient targeting the given admin base URL with a request
 // timeout. apiPathPrefix replaces the SDK's hard-coded "/admin" path segment:
 // pass "/admin" for a real Ory Hydra v2 admin API, or "" for the Cadoles
 // hydra-dispatcher (which serves the v1-style "/oauth2/auth/requests/..." paths).
-func New(adminBaseURL, apiPathPrefix string, timeout time.Duration) *SDKClient {
+// When logger is nil, slog.Default() is used.
+func New(adminBaseURL, apiPathPrefix string, timeout time.Duration, logger *slog.Logger) *SDKClient {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	cfg := ory.NewConfiguration()
 	cfg.Servers = ory.ServerConfigurations{{URL: adminBaseURL}}
 	cfg.HTTPClient = &http.Client{
 		Timeout:   timeout,
 		Transport: &adminPathRewriter{prefix: apiPathPrefix, base: http.DefaultTransport},
 	}
-	return &SDKClient{api: ory.NewAPIClient(cfg).OAuth2API}
+	return &SDKClient{api: ory.NewAPIClient(cfg).OAuth2API, logger: logger}
 }
 
 // adminPathRewriter rewrites the leading "/admin" segment that the Ory SDK
@@ -150,8 +154,10 @@ func (t *adminPathRewriter) RoundTrip(req *http.Request) (*http.Response, error)
 }
 
 func (c *SDKClient) GetLoginRequest(ctx context.Context, challenge string) (*LoginRequest, error) {
+	c.logger.Debug("hydra api", "op", "get_login_request", "challenge", challenge)
 	req, resp, err := c.api.GetOAuth2LoginRequest(ctx).LoginChallenge(challenge).Execute()
 	if err := apiErr("get login request", resp, err); err != nil {
+		c.logFailure(ctx, "get_login_request", challenge, err)
 		return nil, err
 	}
 	out := &LoginRequest{
@@ -167,6 +173,7 @@ func (c *SDKClient) GetLoginRequest(ctx context.Context, challenge string) (*Log
 }
 
 func (c *SDKClient) AcceptLogin(ctx context.Context, challenge string, accept LoginAccept) (string, error) {
+	c.logger.Debug("hydra api", "op", "accept_login", "challenge", challenge, "subject", accept.Subject)
 	body := ory.NewAcceptOAuth2LoginRequest(accept.Subject)
 	body.SetRemember(accept.Remember)
 	if accept.RememberFor > 0 {
@@ -186,14 +193,17 @@ func (c *SDKClient) AcceptLogin(ctx context.Context, challenge string, accept Lo
 		AcceptOAuth2LoginRequest(*body).
 		Execute()
 	if err := apiErr("accept login request", resp, err); err != nil {
+		c.logFailure(ctx, "accept_login", challenge, err)
 		return "", err
 	}
 	return redirect.GetRedirectTo(), nil
 }
 
 func (c *SDKClient) GetConsentRequest(ctx context.Context, challenge string) (*ConsentRequest, error) {
+	c.logger.Debug("hydra api", "op", "get_consent_request", "challenge", challenge)
 	req, resp, err := c.api.GetOAuth2ConsentRequest(ctx).ConsentChallenge(challenge).Execute()
 	if err := apiErr("get consent request", resp, err); err != nil {
+		c.logFailure(ctx, "get_consent_request", challenge, err)
 		return nil, err
 	}
 	out := &ConsentRequest{
@@ -214,6 +224,7 @@ func (c *SDKClient) GetConsentRequest(ctx context.Context, challenge string) (*C
 }
 
 func (c *SDKClient) AcceptConsent(ctx context.Context, challenge string, accept ConsentAccept) (string, error) {
+	c.logger.Debug("hydra api", "op", "accept_consent", "challenge", challenge, "scopes", accept.GrantScope)
 	body := ory.NewAcceptOAuth2ConsentRequest()
 	body.SetGrantScope(accept.GrantScope)
 	if len(accept.GrantAudience) > 0 {
@@ -229,36 +240,17 @@ func (c *SDKClient) AcceptConsent(ctx context.Context, challenge string, accept 
 		AcceptOAuth2ConsentRequest(*body).
 		Execute()
 	if err := apiErr("accept consent request", resp, err); err != nil {
+		c.logFailure(ctx, "accept_consent", challenge, err)
 		return "", err
 	}
 	return redirect.GetRedirectTo(), nil
-}
-
-func (c *SDKClient) RejectConsent(ctx context.Context, challenge, errID, errDesc string) (string, error) {
-	body := ory.RejectOAuth2Request{}
-	body.SetError(errID)
-	body.SetErrorDescription(errDesc)
-	redirect, resp, err := c.api.RejectOAuth2ConsentRequest(ctx).
-		ConsentChallenge(challenge).
-		RejectOAuth2Request(body).
-		Execute()
-	if err := apiErr("reject consent request", resp, err); err != nil {
-		return "", err
-	}
-	return redirect.GetRedirectTo(), nil
-}
-
-func (c *SDKClient) GetLogoutRequest(ctx context.Context, challenge string) (string, error) {
-	req, resp, err := c.api.GetOAuth2LogoutRequest(ctx).LogoutChallenge(challenge).Execute()
-	if err := apiErr("get logout request", resp, err); err != nil {
-		return "", err
-	}
-	return req.GetChallenge(), nil
 }
 
 func (c *SDKClient) AcceptLogout(ctx context.Context, challenge string) (string, error) {
+	c.logger.Debug("hydra api", "op", "accept_logout", "challenge", challenge)
 	redirect, resp, err := c.api.AcceptOAuth2LogoutRequest(ctx).LogoutChallenge(challenge).Execute()
 	if err := apiErr("accept logout request", resp, err); err != nil {
+		c.logFailure(ctx, "accept_logout", challenge, err)
 		return "", err
 	}
 	return redirect.GetRedirectTo(), nil
@@ -293,3 +285,13 @@ func apiErr(op string, resp *http.Response, err error) error {
 }
 
 var _ Client = (*SDKClient)(nil)
+
+// logFailure logs a failed admin call. A gone challenge is routine (expired or
+// already used) and is logged at debug so it does not look like an outage.
+func (c *SDKClient) logFailure(ctx context.Context, op, challenge string, err error) {
+	lvl := slog.LevelError
+	if errors.Is(err, ErrChallengeNotFound) {
+		lvl = slog.LevelDebug
+	}
+	c.logger.Log(ctx, lvl, "hydra api failed", "op", op, "challenge", challenge, "err", err)
+}

@@ -52,10 +52,6 @@ func (f *fakeHydra) AcceptConsent(_ context.Context, _ string, a hydra.ConsentAc
 	f.acceptConsent = a
 	return "https://hydra/after-consent", nil
 }
-func (f *fakeHydra) RejectConsent(context.Context, string, string, string) (string, error) {
-	return "https://hydra/rejected", nil
-}
-func (f *fakeHydra) GetLogoutRequest(_ context.Context, c string) (string, error) { return c, nil }
 func (f *fakeHydra) AcceptLogout(_ context.Context, c string) (string, error) {
 	if err := f.errs["accept logout"]; err != nil {
 		return "", err
@@ -70,6 +66,8 @@ func newServer(t *testing.T, fh *fakeHydra, mutate func(*config.Config)) (*Serve
 		BaseURL:               "https://app.test",
 		AppSecret:             "test-secret-test-secret",
 		CookiePath:            "/",
+		CallbackPath:          "/callback",
+		LogoutCallbackPath:    "/logout/callback",
 		ClientID:              "client-x",
 		ClientSecret:          "secret",
 		OIDCAuthorizeEndpoint: "https://idp.test/authorize",
@@ -83,7 +81,7 @@ func newServer(t *testing.T, fh *fakeHydra, mutate func(*config.Config)) (*Serve
 	if mutate != nil {
 		mutate(cfg)
 	}
-	up, err := upstream.New(context.Background(), cfg, cfg.BaseURL+CallbackPath)
+	up, err := upstream.New(context.Background(), cfg, cfg.BaseURL+cfg.CallbackPath)
 	if err != nil {
 		t.Fatalf("upstream.New: %v", err)
 	}
