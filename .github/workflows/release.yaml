@@ -1,0 +1,171 @@
+name: Release
+
+# Push a semver tag to release, e.g.:
+#   git tag v1.2.3 && git push origin v1.2.3
+#
+# The image goes to the registry named below, with its CycloneDX SBOM attested
+# and both signed by the key pair of hydra-oidc-go; the GitHub release gets
+# the changelog and the SBOM. Secrets of the repository, which the owner
+# creates:
+#   REGISTRY_USERNAME, REGISTRY_PASSWORD  an account of the registry that may
+#                                         push the image
+#   COSIGN_PRIVATE_KEY, COSIGN_PASSWORD   the private key of the pair, as
+#                                         cosign generate-key-pair writes it,
+#                                         and its password; the public key is
+#                                         cosign.pub, at the root of the
+#                                         repository
+# The release itself is created with the token of the workflow.
+#
+# Actions and images are pinned by digest, bumped by Renovate (renovate.json).
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # the GitHub release
+
+env:
+  REGISTRY: reg.cadoles.com
+  IMAGE: reg.cadoles.com/cadoles/hydra-oidc-go
+  SBOM: hydra-oidc-go.cdx.json
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # full history so we can build a changelog
+
+      # Nothing could verify a signature made without it.
+      - name: Public key
+        run: |
+          test -s cosign.pub || { echo "cosign.pub is missing: commit the public key of the pair before releasing"; exit 1; }
+
+      # cosign, pinned by its checksums, before the build: a wrong one stops
+      # the release here, not after the image is pushed. The sums are those of
+      # cosign_checksums.txt of the release; a new version brings them by hand
+      # (renovate.json).
+      - name: Install cosign
+        env:
+          COSIGN_VERSION: v3.1.4 # renovate: datasource=github-releases depName=sigstore/cosign
+        run: |
+          case "$(uname -m)" in
+            x86_64) arch=amd64 sum=424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa ;;
+            aarch64) arch=arm64 sum=ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2 ;;
+            *) echo "no cosign pinned for $(uname -m)"; exit 1 ;;
+          esac
+          dir="${RUNNER_TEMP:-/tmp}/cosign-bin"
+          mkdir -p "$dir"
+          curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors --retry-max-time 120 \
+            -o "$dir/cosign" \
+            "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-${arch}"
+          echo "${sum}  $dir/cosign" | sha256sum -c -
+          chmod +x "$dir/cosign"
+          echo "$dir" >> "$GITHUB_PATH"
+          "$dir/cosign" version
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to the registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      # Pushed by its digest alone: the tags come last, once the digest is
+      # signed and verified, so that a failure on the way leaves no version
+      # tag, latest included, on an image the key does not verify.
+      - name: Build and push image, by digest
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          build-args: VERSION=${{ github.ref_name }}
+          tags: ${{ env.IMAGE }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+
+      # The SBOM of the image pushed, read from the registry: the Go modules of
+      # the binary and the packages of distroless.
+      - name: SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          output-file: ${{ env.SBOM }}
+          upload-artifact: false
+          upload-release-assets: false
+
+      # Signed by the key pair alone, in the format of cosign 2: the signature
+      # and the attestation under the tags sha256-<digest>.sig and .att of the
+      # repository. The bundle of cosign 3, its default, goes by the referrers
+      # API of OCI 1.1, which Harbor of reg.cadoles.com refuses. Without a
+      # signing config nor a transparency log, nothing goes to the public
+      # services of Sigstore, and a verification ignores the log
+      # (--insecure-ignore-tlog), the key being what proves. The digest is
+      # signed, never a tag.
+      - name: Sign the image, attest its SBOM
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          REF: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+        run: |
+          set -- --yes --key env://COSIGN_PRIVATE_KEY \
+            --new-bundle-format=false --use-signing-config=false --tlog-upload=false
+          cosign sign "$@" "$REF"
+          cosign attest "$@" --type cyclonedx --predicate "$SBOM" "$REF"
+
+      - name: Verify the signature and the attestation
+        env:
+          REF: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+        run: |
+          cosign verify --key cosign.pub --insecure-ignore-tlog=true "$REF" >/dev/null
+          cosign verify-attestation --key cosign.pub --insecure-ignore-tlog=true \
+            --type cyclonedx "$REF" >/dev/null
+
+      # The tags of the version, and latest, on the digest signed and verified:
+      # from one source, imagetools makes a carbon copy, the digest kept. The
+      # image is an index by the default provenance attestation; without it, a
+      # lone manifest would be wrapped in a new index, another digest,
+      # unsigned, unless --prefer-index=false.
+      - name: Tag the image
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          REF: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+        run: |
+          set -f --
+          for tag in $TAGS; do set -- "$@" -t "$tag"; done
+          docker buildx imagetools create --prefer-index=false "$@" "$REF"
+
+      - name: Create the GitHub release, with the SBOM
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          prev="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          if [ -n "$prev" ]; then
+            range="${prev}..${GITHUB_REF_NAME}"
+          else
+            range="${GITHUB_REF_NAME}"
+          fi
+          {
+            echo "Image: \`${IMAGE}@${DIGEST}\`, signed: \`cosign verify --key cosign.pub --insecure-ignore-tlog=true ${IMAGE}@${DIGEST}\`."
+            echo
+            git log --no-merges --pretty='- %s' "$range"
+          } > notes.md
+          cp "$SBOM" "hydra-oidc-go-${GITHUB_REF_NAME}.cdx.json"
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md "hydra-oidc-go-${GITHUB_REF_NAME}.cdx.json"

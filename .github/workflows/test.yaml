@@ -1,0 +1,102 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      # setup-go may install the go directive's version and set
+      # GOTOOLCHAIN=local: name the toolchain directive's, the image's, which
+      # the go command then fetches. Fail if another one still runs.
+      - name: Toolchain
+        run: echo "GOTOOLCHAIN=$(sed -n 's/^toolchain //p' go.mod)" >> "$GITHUB_ENV"
+
+      - name: Go version
+        run: |
+          go version
+          test "$(go env GOVERSION)" = "$(sed -n 's/^toolchain //p' go.mod)"
+
+      - name: Tidy
+        run: go mod tidy -diff
+
+      # The go command checks a module against go.sum when it downloads it,
+      # not in the module cache setup-go restores.
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Build
+        run: go build ./...
+
+      # go fmt runs the gofmt of that toolchain, gofmt alone the installed one.
+      - name: Format
+        run: out=$(go fmt ./...); test -z "$out" || { echo "$out"; exit 1; }
+
+      - name: Vet
+        run: go vet ./...
+
+      # Tool versions are pinned by the tool directive in go.mod.
+      - name: Staticcheck
+        run: go tool staticcheck ./...
+
+      - name: Govulncheck
+        run: go tool govulncheck ./...
+
+      - name: Test
+        run: go test -race ./...
+
+      # Built, never pushed: a Dockerfile or .dockerignore error shows here,
+      # not at release. Actions and images are pinned by digest, bumped by
+      # Renovate (renovate.json).
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          push: false
+          provenance: false
+          outputs: type=docker,dest=/tmp/hydra-oidc-image.tar
+
+      # The image scanned by Trivy: govulncheck reads the database of Go
+      # alone, which may lag behind the advisories of GitHub. Fails on a
+      # vulnerability with a fix, MEDIUM and above, of a Go module or a
+      # package of distroless. The entries of the database of Go have no
+      # severity in Trivy (UNKNOWN): govulncheck keeps them, knowing whether
+      # the code calls them. Trivy is pinned by its checksums, those of the
+      # release's checksums file; a new version brings them by hand
+      # (renovate.json), a wrong one stops here.
+      - name: Install Trivy
+        env:
+          TRIVY_VERSION: v0.76.2 # renovate: datasource=github-releases depName=aquasecurity/trivy
+        run: |
+          case "$(uname -m)" in
+            x86_64) arch=64bit sum=bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf ;;
+            aarch64) arch=ARM64 sum=ab9d51f86e6a5fb936f605faff6b593ac51bc378fff4d3e8b9d58358b9c367c3 ;;
+            *) echo "no Trivy pinned for $(uname -m)"; exit 1 ;;
+          esac
+          dir="${RUNNER_TEMP:-/tmp}/trivy-bin"
+          mkdir -p "$dir"
+          curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors --retry-max-time 120 \
+            -o "$dir/trivy.tar.gz" \
+            "https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}/trivy_${TRIVY_VERSION#v}_Linux-${arch}.tar.gz"
+          echo "${sum}  $dir/trivy.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/trivy.tar.gz" -C "$dir" trivy
+          echo "$dir" >> "$GITHUB_PATH"
+
+      - name: Scan the image
+        run: |
+          trivy image --input /tmp/hydra-oidc-image.tar --scanners vuln \
+            --ignore-unfixed --severity MEDIUM,HIGH,CRITICAL --exit-code 1 --no-progress

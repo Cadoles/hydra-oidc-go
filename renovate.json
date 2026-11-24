@@ -1,0 +1,52 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Weekly minor and patch updates, merged once the CI passes; majors, ory/hydra-client-go, cosign and Trivy in pull requests of their own, reviewed.",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    "docker:pinDigests"
+  ],
+  "timezone": "Europe/Paris",
+  "schedule": ["* 0-5 * * 1"],
+  "postUpdateOptions": ["gomodTidy"],
+  "packageRules": [
+    {
+      "description": "Minor and patch updates and new digests, grouped each week, merged once the CI passes (tests, govulncheck).",
+      "matchUpdateTypes": ["minor", "patch", "digest", "pin", "pinDigest"],
+      "groupName": "weekly updates",
+      "automerge": true
+    },
+    {
+      "description": "The Go toolchain of go.mod and the golang image of the Dockerfile move together: the image sets GOTOOLCHAIN=local.",
+      "matchDepNames": ["go", "golang"],
+      "groupName": "go toolchain",
+      "automerge": true
+    },
+    {
+      "description": "A major version: a pull request of its own, reviewed.",
+      "matchUpdateTypes": ["major"],
+      "groupName": null,
+      "automerge": false
+    },
+    {
+      "description": "ory/hydra-client-go follows the version of Hydra the app is played against: a pull request of its own, reviewed.",
+      "matchPackageNames": ["/^github\\.com/ory/hydra-client-go(/|$)/"],
+      "groupName": null,
+      "automerge": false
+    },
+    {
+      "description": "cosign of the release workflow and Trivy of the test workflow: their two checksums come by hand from the release's checksums file; the workflow stops on a wrong one: reviewed.",
+      "matchDepNames": ["sigstore/cosign", "aquasecurity/trivy"],
+      "groupName": null,
+      "automerge": false
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "cosign and Trivy of the workflows, a version a comment names.",
+      "managerFilePatterns": ["/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": ["[A-Z]+_VERSION: (?<currentValue>v[0-9.]+) # renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>[^\\s]+)"]
+    }
+  ]
+}

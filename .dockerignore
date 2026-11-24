@@ -1,0 +1,9 @@
+# Allowlist: only the Go sources the Dockerfile builds from enter the context,
+# never a local binary, an .env or editor files.
+*
+!go.mod
+!go.sum
+!cmd/**/*.go
+!internal/**/*.go
+**/*_test.go
+internal/oidctest
