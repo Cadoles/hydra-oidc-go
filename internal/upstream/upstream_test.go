@@ -10,8 +10,8 @@ import (
 
 	"golang.org/x/oauth2"
 
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/config"
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/oidctest"
+	"github.com/RudyMCh/hydra-oidc-go/internal/config"
+	"github.com/RudyMCh/hydra-oidc-go/internal/oidctest"
 )
 
 // testClient builds a client on explicit endpoints (no discovery), signatures

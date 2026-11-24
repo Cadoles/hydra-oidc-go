@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/config"
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/hydra"
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/oidctest"
+	"github.com/RudyMCh/hydra-oidc-go/internal/config"
+	"github.com/RudyMCh/hydra-oidc-go/internal/hydra"
+	"github.com/RudyMCh/hydra-oidc-go/internal/oidctest"
 )
 
 const (
@@ -171,7 +171,7 @@ func TestCallbackAcceptsLogin(t *testing.T) {
 	}
 }
 
-// FranceConnect's shape: ES256, the userinfo a signed JWT.
+// A provider that signs in ES256 and sends its userinfo as a signed JWT.
 func TestCallbackES256AndJWTUserinfo(t *testing.T) {
 	j := startLogin(t, func(cfg *config.Config, _ *oidctest.Provider) {
 		cfg.IDTokenSigningAlgs = []string{"ES256"}
@@ -711,5 +711,26 @@ func TestCallbackIDTokenTooLargeForTheCookie(t *testing.T) {
 	}
 	if c := setCookie(rec, "oidc_session"); c != nil {
 		t.Errorf("no session cookie expected: %d bytes", len(c.Value))
+	}
+}
+
+// The logout that follows a failed login returns to LOGOUT_CALLBACK_PATH too.
+func TestUpstreamLogoutOnErrorConfiguredPath(t *testing.T) {
+	j := startLogin(t, func(cfg *config.Config, _ *oidctest.Provider) {
+		cfg.UpstreamLogoutOnError = true
+		cfg.OIDCLogoutEndpoint = "https://idp.test/logout?%s"
+		cfg.LogoutCallbackPath = "/logout-done"
+	})
+	j.provider(j.idToken(nil), userinfoOf("someone-else"))
+
+	rec := j.callback()
+
+	end, _ := url.Parse(rec.Header().Get("Location"))
+	if got := end.Query().Get("post_logout_redirect_uri"); got != "https://app.test/logout-done" {
+		t.Fatalf("post_logout_redirect_uri = %q", got)
+	}
+	// Without REDIRECT_ON_ERROR_URL, the error is a plain status.
+	if rec := j.get("/logout-done?state=" + url.QueryEscape(end.Query().Get("state"))); rec.Code != http.StatusForbidden {
+		t.Errorf("return: %d, want 403", rec.Code)
 	}
 }

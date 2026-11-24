@@ -19,7 +19,7 @@ func TestLoadExplicitEndpoints(t *testing.T) {
 	t.Setenv("OIDC_AUTHORIZE_ENDPOINT", "https://idp/authorize")
 	t.Setenv("OIDC_TOKEN_ENDPOINT", "https://idp/token")
 	t.Setenv("OIDC_JWKS_ENDPOINT", "https://idp/jwks")
-	t.Setenv("OIDC_SCOPE", "openid identite_pivot email")
+	t.Setenv("OIDC_SCOPE", "openid profile email")
 	t.Setenv("PARAMS_TO_INSERT", `{"acr_values":"eidas1"}`)
 	t.Setenv("HYDRA_API_PATH_PREFIX", "") // dispatcher mode: empty must win
 
@@ -30,7 +30,7 @@ func TestLoadExplicitEndpoints(t *testing.T) {
 	if cfg.HydraAPIPathPrefix != "" {
 		t.Errorf("HYDRA_API_PATH_PREFIX empty should win, got %q", cfg.HydraAPIPathPrefix)
 	}
-	if len(cfg.Scopes) != 3 || cfg.Scopes[1] != "identite_pivot" {
+	if len(cfg.Scopes) != 3 || cfg.Scopes[1] != "profile" {
 		t.Errorf("scopes parse (space-separated) failed: %#v", cfg.Scopes)
 	}
 	if cfg.ParamsToInsert["acr_values"] != "eidas1" {

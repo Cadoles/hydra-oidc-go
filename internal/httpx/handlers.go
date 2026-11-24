@@ -9,11 +9,11 @@ import (
 
 	"golang.org/x/oauth2"
 
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/flowstate"
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/hydra"
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/metrics"
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/oidc"
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/upstream"
+	"github.com/RudyMCh/hydra-oidc-go/internal/flowstate"
+	"github.com/RudyMCh/hydra-oidc-go/internal/hydra"
+	"github.com/RudyMCh/hydra-oidc-go/internal/metrics"
+	"github.com/RudyMCh/hydra-oidc-go/internal/oidc"
+	"github.com/RudyMCh/hydra-oidc-go/internal/upstream"
 )
 
 // protocolClaims are OIDC/JWT envelope claims that must NOT be copied from the

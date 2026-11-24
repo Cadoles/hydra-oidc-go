@@ -53,7 +53,7 @@ type Config struct {
 	ClientID           string `env:"CLIENT_ID,required"`
 	ClientSecret       string `env:"CLIENT_SECRET,required"`
 	// Scopes requested upstream. OIDC_SCOPE is space-separated (e.g.
-	// "openid identite_pivot email"), matching the original app.
+	// "openid profile email"), matching the original app.
 	Scopes []string `env:"-"`
 	// Extra authorize-request params to add (PARAMS_TO_INSERT, JSON object, e.g.
 	// {"acr_values":"eidas1"}) or strip (PARAMS_TO_DELETE, JSON array).

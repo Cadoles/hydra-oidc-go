@@ -20,13 +20,13 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/config"
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/flowstate"
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/httpx"
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/hydra"
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/metrics"
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/obs"
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/upstream"
+	"github.com/RudyMCh/hydra-oidc-go/internal/config"
+	"github.com/RudyMCh/hydra-oidc-go/internal/flowstate"
+	"github.com/RudyMCh/hydra-oidc-go/internal/httpx"
+	"github.com/RudyMCh/hydra-oidc-go/internal/hydra"
+	"github.com/RudyMCh/hydra-oidc-go/internal/metrics"
+	"github.com/RudyMCh/hydra-oidc-go/internal/obs"
+	"github.com/RudyMCh/hydra-oidc-go/internal/upstream"
 )
 
 // version is the release, set at build time (-ldflags -X main.version=…).

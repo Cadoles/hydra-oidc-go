@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/config"
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/flowstate"
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/hydra"
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/upstream"
+	"github.com/RudyMCh/hydra-oidc-go/internal/config"
+	"github.com/RudyMCh/hydra-oidc-go/internal/flowstate"
+	"github.com/RudyMCh/hydra-oidc-go/internal/hydra"
+	"github.com/RudyMCh/hydra-oidc-go/internal/upstream"
 )
 
 // --- fake Hydra ---

@@ -20,7 +20,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
-	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/config"
+	"github.com/RudyMCh/hydra-oidc-go/internal/config"
 )
 
 // ErrUserInfoInvalid is a userinfo answer the provider did send, but that
@@ -199,7 +199,7 @@ func (c *Client) UserInfoEnabled() bool { return !c.skipUserinfo && c.userinfoUR
 
 // UserInfo fetches the userinfo endpoint and returns its claims, or nil when
 // userinfo is disabled or no endpoint is known. The answer is JSON, or a JWT
-// (FranceConnect signs its userinfo): the JWT's signature is verified with
+// (some providers sign their userinfo): the JWT's signature is verified with
 // the provider's keys, unless OIDC_VERIFY_SIGNATURE is off. Its sub must be
 // subject, the id_token's (OpenID Connect Core 5.3.2): otherwise the answer
 // may be about someone else, and ErrUserInfoInvalid is returned.
