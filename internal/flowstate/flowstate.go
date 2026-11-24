@@ -44,6 +44,10 @@ type LogoutState struct {
 	ErrorMessage    string
 }
 
+// maxCookieSize is the size of a cookie, name and value, that browsers accept
+// (RFC 6265bis).
+const maxCookieSize = 4096
+
 // flowTTL is how long the login and logout round-trips to the provider may
 // take.
 const flowTTL = 10 * time.Minute
@@ -74,7 +78,12 @@ func newManager(appSecret, cookiePath string, secure bool, ttls map[string]time.
 	blockKey := sha256.Sum256([]byte("hydra-oidc-go/block:" + appSecret)) // 32 bytes → AES-256
 	codecs := make(map[string]*securecookie.SecureCookie, len(ttls))
 	for name, ttl := range ttls {
-		codecs[name] = securecookie.New(hashKey[:], blockKey[:]).MaxAge(int(ttl.Seconds()))
+		// A browser drops, without a word, a cookie whose name and value
+		// exceed 4096 bytes together: the codec refuses the value first, so
+		// that the caller knows.
+		codecs[name] = securecookie.New(hashKey[:], blockKey[:]).
+			MaxAge(int(ttl.Seconds())).
+			MaxLength(maxCookieSize - len(name))
 	}
 	if cookiePath == "" {
 		cookiePath = "/"

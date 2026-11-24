@@ -44,10 +44,10 @@ type Client struct {
 	httpClient     *http.Client
 }
 
-// New builds the client. redirectURL must be the app's externally-reachable
-// callback URL (BASE_URL + the callback route). It performs discovery when
+// New builds the client. The redirect_uri it sends is BASE_URL followed by
+// CALLBACK_PATH, the route the app serves. It performs discovery when
 // OIDC_ISSUER is set, otherwise it uses the explicit endpoints.
-func New(ctx context.Context, cfg *config.Config, redirectURL string) (*Client, error) {
+func New(ctx context.Context, cfg *config.Config) (*Client, error) {
 	httpClient := &http.Client{Timeout: 15 * time.Second}
 	ctx = oidc.ClientContext(ctx, httpClient)
 
@@ -79,7 +79,7 @@ func New(ctx context.Context, cfg *config.Config, redirectURL string) (*Client, 
 		ClientID:     cfg.ClientID,
 		ClientSecret: cfg.ClientSecret,
 		Endpoint:     provider.Endpoint(),
-		RedirectURL:  redirectURL,
+		RedirectURL:  cfg.BaseURL + cfg.CallbackPath,
 		Scopes:       cfg.Scopes,
 	}
 

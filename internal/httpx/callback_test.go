@@ -632,28 +632,28 @@ func TestUpstreamLogoutOnError(t *testing.T) {
 		name    string
 		prepare func(j *journey)
 		status  string
-		hint    bool // the id_token is the one of the token response
+		message string
 	}{
 		{"the userinfo of another sub", func(j *journey) {
 			j.provider(j.idToken(nil), userinfoOf("someone-else"))
-		}, "403", true},
+		}, "403", "userinfo verification failed"},
 		{"the userinfo fails", func(j *journey) {
 			j.provider(j.idToken(nil), nil)
 			j.idp.Set(func(p *oidctest.Provider) {
 				p.UserInfo = func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) }
 			})
-		}, "502", true},
+		}, "502", "userinfo fetch failed"},
 		{"another nonce", func(j *journey) {
 			j.provider(j.idToken(func(c map[string]any) { c["nonce"] = "replayed" }), userinfoOf("user-123"))
-		}, "403", true},
+		}, "403", "id_token verification failed"},
 		{"hydra refuses the accept", func(j *journey) {
 			j.provider(j.idToken(nil), userinfoOf("user-123"))
 			j.fh.errs["accept login"] = errors.New("boom")
-		}, "502", true},
+		}, "502", "could not accept login"},
 		{"the challenge unknown to hydra", func(j *journey) {
 			j.provider(j.idToken(nil), userinfoOf("user-123"))
 			j.fh.errs["accept login"] = gone
-		}, "410", true},
+		}, "410", "challenge expired or unknown"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -682,6 +682,9 @@ func TestUpstreamLogoutOnError(t *testing.T) {
 			page, _ := url.Parse(rec.Header().Get("Location"))
 			if !strings.HasPrefix(page.String(), errorPage+"?") || page.Query().Get("status_code") != tc.status {
 				t.Errorf("return: %d %q, want the error page with status %s", rec.Code, page, tc.status)
+			}
+			if page.Query().Get("message") != tc.message {
+				t.Errorf("message = %q, want %q", page.Query().Get("message"), tc.message)
 			}
 			if j.fh.logoutAccepted != "" {
 				t.Errorf("no logout of hydra is to accept: %q", j.fh.logoutAccepted)
@@ -782,5 +785,21 @@ func TestUpstreamLogoutOnErrorConfiguredPath(t *testing.T) {
 	// Without REDIRECT_ON_ERROR_URL, the error is a plain status.
 	if rec := j.get("/logout-done?state=" + url.QueryEscape(end.Query().Get("state"))); rec.Code != http.StatusForbidden {
 		t.Errorf("return: %d, want 403", rec.Code)
+	}
+}
+
+// The error the provider returns comes by the browser: its text never reaches
+// the error page.
+func TestCallbackProviderErrorMessage(t *testing.T) {
+	fh := &fakeHydra{}
+	rec := play(t, fh, func(cfg *config.Config) { cfg.RedirectOnErrorURL = errorPage },
+		"/callback?error=x&error_description="+url.QueryEscape("Your account is locked, call 01 23 45 67 89"))
+
+	page, _ := url.Parse(rec.Header().Get("Location"))
+	if page.Query().Get("status_code") != "403" || page.Query().Get("message") != "the provider returned an error" {
+		t.Errorf("Location = %q", page)
+	}
+	if strings.Contains(rec.Header().Get("Location"), "locked") || strings.Contains(rec.Body.String(), "locked") {
+		t.Errorf("the text of the query reached the answer: %q", rec.Header().Get("Location"))
 	}
 }

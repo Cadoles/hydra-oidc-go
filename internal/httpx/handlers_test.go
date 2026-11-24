@@ -81,7 +81,7 @@ func newServer(t *testing.T, fh *fakeHydra, mutate func(*config.Config)) (*Serve
 	if mutate != nil {
 		mutate(cfg)
 	}
-	up, err := upstream.New(context.Background(), cfg, cfg.BaseURL+cfg.CallbackPath)
+	up, err := upstream.New(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("upstream.New: %v", err)
 	}

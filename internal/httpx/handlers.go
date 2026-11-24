@@ -83,7 +83,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if e := q.Get("error"); e != "" {
-		s.errorRedirect(w, r, http.StatusForbidden, "upstream error: "+e+" "+q.Get("error_description"), nil)
+		// The query is the browser's: its text goes to the log, never to the
+		// error page, where anyone could have a message of their own shown.
+		s.Logger.Warn("the provider returned an error", "error", e, "error_description", q.Get("error_description"))
+		s.sendError(w, r, http.StatusForbidden, "the provider returned an error")
 		return
 	}
 

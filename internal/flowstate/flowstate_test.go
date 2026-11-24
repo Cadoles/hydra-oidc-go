@@ -3,6 +3,7 @@ package flowstate
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -137,5 +138,31 @@ func TestNewLifetimes(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Errorf("cookies not set: %v", want)
+	}
+}
+
+// A cookie is set whole or not at all: never one a browser would drop for its
+// size, name and value above 4096 bytes, while SetSession says it is kept.
+func TestSessionCookieSize(t *testing.T) {
+	m := New(secret, "/", false, time.Hour)
+	kept, refused := 0, 0
+	for n := 2200; n <= 2260; n++ {
+		rec := httptest.NewRecorder()
+		err := m.SetSession(rec, strings.Repeat("a", n))
+		cookies := rec.Result().Cookies()
+		if err != nil {
+			refused++
+			if len(cookies) != 0 {
+				t.Fatalf("%d bytes: refused, yet a cookie is set", n)
+			}
+			continue
+		}
+		kept++
+		if size := len(cookies[0].Name) + len(cookies[0].Value); size > 4096 {
+			t.Fatalf("%d bytes: a cookie of %d bytes is set, which a browser drops", n, size)
+		}
+	}
+	if kept == 0 || refused == 0 {
+		t.Fatalf("the sizes tried do not cross the limit: %d kept, %d refused", kept, refused)
 	}
 }

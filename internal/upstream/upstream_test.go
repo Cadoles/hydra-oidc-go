@@ -22,6 +22,7 @@ func testClient(t *testing.T, idp *oidctest.Provider, mutate func(*config.Config
 		ClientID:              oidctest.ClientID,
 		ClientSecret:          "secret",
 		BaseURL:               "https://app.test",
+		CallbackPath:          "/callback",
 		OIDCAuthorizeEndpoint: idp.URL + "/authorize",
 		OIDCTokenEndpoint:     idp.URL + "/token",
 		OIDCJWKSEndpoint:      idp.URL + "/jwks",
@@ -33,7 +34,7 @@ func testClient(t *testing.T, idp *oidctest.Provider, mutate func(*config.Config
 	if mutate != nil {
 		mutate(cfg)
 	}
-	c, err := New(context.Background(), cfg, "https://app.test/callback")
+	c, err := New(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("upstream.New: %v", err)
 	}

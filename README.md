@@ -35,7 +35,8 @@ reads the challenge and follows where the flow went.
 ### Errors
 
 An error is shown at `REDIRECT_ON_ERROR_URL`, with `?status_code` and `?message`, or as a plain
-status when that URL is not set. With `UPSTREAM_LOGOUT_ON_ERROR`, a login that fails once the
+status when that URL is not set. The message is one of the app's own: what the provider or the
+browser sends goes to the log only. With `UPSTREAM_LOGOUT_ON_ERROR`, a login that fails once the
 provider has answered (an `id_token` or a userinfo that does not pass, Hydra refusing the accept)
 first sends the browser to the provider's logout, then shows the error at the return: the next
 attempt asks the provider for the identity again, instead of failing the same way with the same
@@ -51,7 +52,8 @@ No server-side session. Cross-redirect state travels in **encrypted, signed cook
   recognises a replayed callback until it expires.
 - `oidc_session` — the upstream `id_token`, needed as `id_token_hint` at logout. It lasts
   `SESSION_TTL`: after it, a logout no longer goes through the provider. An `id_token` too large for a cookie (about 2 kB) is not kept: the user
-  is signed in, and the logout goes without the provider; a log line says so.
+  is signed in, and the logout goes without the provider; a log line says so. The limit is the
+  browsers', 4096 bytes for the name and the value of a cookie.
 - `oidc_logout` — logout challenge + state (logout → logout callback, 10 min); for
   `UPSTREAM_LOGOUT_ON_ERROR`, the error to show at the return.
 
@@ -106,6 +108,7 @@ Each cookie is refused once older than its own lifetime, whatever the browser se
 | `REDIRECT_ON_ERROR_URL` | | On error, redirect here with `?status_code&message`; else a plain status |
 | `UPSTREAM_LOGOUT_ON_ERROR` | `false` | End the provider's session before the error, when a login fails after the provider answered |
 | `SESSION_TTL` | `3600` | Seconds the provider's `id_token` is kept for the logout (the `oidc_session` cookie) |
+| `VERSION` | the build's | Release named in the logs and to Sentry; the image sets it at build time |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`; JSON lines on stdout |
 | `SENTRY_DSN` / `SENTRY_ENVIRONMENT` | | Optional error reporting |
 | `LISTEN_ADDR` | `:8080` | |

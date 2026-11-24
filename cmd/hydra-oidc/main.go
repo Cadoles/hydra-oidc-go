@@ -95,7 +95,7 @@ func run() error {
 
 	ctx := context.Background()
 
-	upstreamClient, err := upstream.New(ctx, cfg, cfg.BaseURL+cfg.CallbackPath)
+	upstreamClient, err := upstream.New(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("init upstream oidc: %w", err)
 	}

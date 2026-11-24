@@ -208,8 +208,14 @@ func validRoute(p string) error {
 	if !strings.HasPrefix(p, "/") || p == "/" {
 		return fmt.Errorf("must be a path starting with / and not / alone")
 	}
-	if strings.ContainsAny(p, "{}*?# \t") {
-		return fmt.Errorf("must be a literal path, without query, fragment, space nor pattern")
+	if strings.ContainsAny(p, "{}*?#% \t") {
+		return fmt.Errorf("must be a literal path, without query, fragment, escape, space nor pattern")
+	}
+	// What a browser or a proxy would rewrite before it reaches the app.
+	for _, segment := range strings.Split(p[1:], "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return fmt.Errorf("must have no empty, . nor .. segment")
+		}
 	}
 	for _, r := range reservedRoutes {
 		if p == r {

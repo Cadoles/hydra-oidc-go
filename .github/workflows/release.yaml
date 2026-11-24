@@ -75,6 +75,8 @@ jobs:
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
 
+      # latest follows the releases only: a tag with a hyphen (v1.0.0-rc1) is a
+      # prerelease, and keeps its own tag.
       - name: Compute image tags
         id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
@@ -83,7 +85,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
       # Pushed by its digest alone: the tags come last, once the digest is
       # signed and verified, so that a failure on the way leaves no version
