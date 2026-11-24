@@ -49,10 +49,8 @@ No server-side session. Cross-redirect state travels in **encrypted, signed cook
 - `oidc_flow` — `state`, `nonce`, PKCE verifier, login challenge (login → callback, 10 min). Once
   the login is accepted it is replaced by a mark, the `state` and the challenge alone, which
   recognises a replayed callback until it expires.
-- `oidc_session` — the upstream `id_token`, needed as `id_token_hint` at logout. Held in the cookie
-  by default; when `REDIS_DSN` is set it is stored in Redis under an opaque id and the cookie holds
-  only that id. It lasts `HYDRA_OIDC_REDIS_TTL` in both cases: after it, a logout no longer goes
-  through the provider. An `id_token` too large for a cookie (about 2 kB) is not kept: the user
+- `oidc_session` — the upstream `id_token`, needed as `id_token_hint` at logout. It lasts
+  `SESSION_TTL`: after it, a logout no longer goes through the provider. An `id_token` too large for a cookie (about 2 kB) is not kept: the user
   is signed in, and the logout goes without the provider; a log line says so.
 - `oidc_logout` — logout challenge + state (logout → logout callback, 10 min); for
   `UPSTREAM_LOGOUT_ON_ERROR`, the error to show at the return.
@@ -64,14 +62,15 @@ Each cookie is refused once older than its own lifetime, whatever the browser se
 - Built on `coreos/go-oidc` + `golang.org/x/oauth2` (discovery, JWKS, verification, PKCE).
 - **id_token signatures are verified** (the PHP app only checked the nonce) and **PKCE is used** —
   both default-on and each disableable per-provider (`OIDC_VERIFY_SIGNATURE`, `OIDC_PKCE_ENABLED`).
-- Stateless cookies instead of a Redis session (Redis is optional, only for the logout id_token).
+- Stateless cookies instead of a Redis session: there is no Redis any more.
 - A userinfo sent as a JWT is supported, its signature verified.
 - The provider's tokens are no longer put in Hydra's `session.access_token`.
 - The returns from the provider are served at `/callback` and `/logout/callback` by default
   (`/connect/oidc/check` and `/logout-hydra` in the PHP app): set `CALLBACK_PATH` and
   `LOGOUT_CALLBACK_PATH` to keep URLs already declared at a provider.
 - `OIC_AUTHORIZE_ENDPOINT` is `OIDC_AUTHORIZE_ENDPOINT`; `POST_LOGOUT_REDIRECT_URL` and
-  `TRUSTED_PROXIES`, which did nothing, are gone; the health probe is `/health`.
+  `TRUSTED_PROXIES`, which did nothing, are gone, as are `REDIS_DSN` and `HYDRA_OIDC_REDIS_PREFIX`;
+  `HYDRA_OIDC_REDIS_TTL` is `SESSION_TTL`; the health probe is `/health`.
 
 ## Configuration (environment variables)
 
@@ -106,9 +105,7 @@ Each cookie is refused once older than its own lifetime, whatever the browser se
 | `AUTH_ACR` | | Overrides the upstream `acr` passed to Hydra |
 | `REDIRECT_ON_ERROR_URL` | | On error, redirect here with `?status_code&message`; else a plain status |
 | `UPSTREAM_LOGOUT_ON_ERROR` | `false` | End the provider's session before the error, when a login fails after the provider answered |
-| `REDIS_DSN` | empty | Optional; stores the upstream id_token for logout (else cookie) |
-| `HYDRA_OIDC_REDIS_PREFIX` | | Redis key prefix |
-| `HYDRA_OIDC_REDIS_TTL` | `3600` | Upstream-session TTL, in seconds: the cookie's, and the Redis entry's |
+| `SESSION_TTL` | `3600` | Seconds the provider's `id_token` is kept for the logout (the `oidc_session` cookie) |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`; JSON lines on stdout |
 | `SENTRY_DSN` / `SENTRY_ENVIRONMENT` | | Optional error reporting |
 | `LISTEN_ADDR` | `:8080` | |
@@ -136,4 +133,5 @@ signature verifies.
 
 ## License
 
-[GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
+[GNU Affero General Public License](LICENSE), version 3 or (at your option) any later version
+(`AGPL-3.0-or-later`).

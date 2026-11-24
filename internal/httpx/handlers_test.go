@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RudyMCh/hydra-oidc-go/internal/config"
-	"github.com/RudyMCh/hydra-oidc-go/internal/flowstate"
-	"github.com/RudyMCh/hydra-oidc-go/internal/hydra"
-	"github.com/RudyMCh/hydra-oidc-go/internal/upstream"
+	"github.com/Cadoles/hydra-oidc-go/internal/config"
+	"github.com/Cadoles/hydra-oidc-go/internal/flowstate"
+	"github.com/Cadoles/hydra-oidc-go/internal/hydra"
+	"github.com/Cadoles/hydra-oidc-go/internal/upstream"
 )
 
 // --- fake Hydra ---
@@ -85,7 +85,7 @@ func newServer(t *testing.T, fh *fakeHydra, mutate func(*config.Config)) (*Serve
 	if err != nil {
 		t.Fatalf("upstream.New: %v", err)
 	}
-	flow := flowstate.New(cfg.AppSecret, cfg.CookiePath, cfg.HTTPS(), nil, time.Hour)
+	flow := flowstate.New(cfg.AppSecret, cfg.CookiePath, cfg.HTTPS(), time.Hour)
 	s := New(Deps{
 		Config:   cfg,
 		Hydra:    fh,
@@ -220,7 +220,7 @@ func TestLogoutRedirectsToUpstreamWhenSessionPresent(t *testing.T) {
 
 	// Seed an upstream id_token session cookie.
 	seed := httptest.NewRecorder()
-	if err := flow.SetSession(context.Background(), seed, "UPSTREAM_ID_TOKEN"); err != nil {
+	if err := flow.SetSession(seed, "UPSTREAM_ID_TOKEN"); err != nil {
 		t.Fatalf("seed session: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/logout?logout_challenge=l1", nil)

@@ -84,12 +84,10 @@ type Config struct {
 	// same way with the same one.
 	UpstreamLogoutOnError bool `env:"UPSTREAM_LOGOUT_ON_ERROR" envDefault:"false"`
 
-	// Optional Redis — used ONLY to hold the upstream id_token between login and
-	// a (possibly much later) logout, keyed by an opaque session id. When unset,
-	// the id_token rides in an encrypted cookie instead (fully stateless).
-	RedisDSN    string        `env:"REDIS_DSN"`
-	RedisPrefix string        `env:"HYDRA_OIDC_REDIS_PREFIX"`
-	RedisTTL    time.Duration `env:"-"`
+	// SessionTTL (SESSION_TTL, in seconds) is how long the provider's
+	// id_token is kept, in an encrypted cookie, for the logout: past it, a
+	// logout no longer goes through the provider.
+	SessionTTL time.Duration `env:"-"`
 
 	// Cookies are signed AND encrypted with keys derived from this secret.
 	AppSecret string `env:"APP_SECRET,required"`
@@ -152,14 +150,14 @@ func Load() (*Config, error) {
 		cfg.ClaimScopes = parseClaimScopes(v)
 	}
 
-	// HYDRA_OIDC_REDIS_TTL is in seconds (default 3600), matching the original.
-	cfg.RedisTTL = time.Hour
-	if v, ok := os.LookupEnv("HYDRA_OIDC_REDIS_TTL"); ok && strings.TrimSpace(v) != "" {
+	// SESSION_TTL is in seconds (default 3600).
+	cfg.SessionTTL = time.Hour
+	if v, ok := os.LookupEnv("SESSION_TTL"); ok && strings.TrimSpace(v) != "" {
 		secs, err := time.ParseDuration(v + "s")
 		if err != nil {
-			return nil, fmt.Errorf("parse HYDRA_OIDC_REDIS_TTL (seconds): %w", err)
+			return nil, fmt.Errorf("parse SESSION_TTL (seconds): %w", err)
 		}
-		cfg.RedisTTL = secs
+		cfg.SessionTTL = secs
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -181,8 +179,8 @@ func (c *Config) Validate() error {
 	}
 	// The lifetime of the upstream session is the age past which its cookie is
 	// refused: zero would turn that check off, and keep the cookie for ever.
-	if c.RedisTTL < time.Second {
-		return fmt.Errorf("HYDRA_OIDC_REDIS_TTL must be at least one second")
+	if c.SessionTTL < time.Second {
+		return fmt.Errorf("SESSION_TTL must be at least one second")
 	}
 	if _, ok := parseSlogLevel(c.LogLevel); !ok {
 		return fmt.Errorf("LOG_LEVEL %q is invalid (allowed: debug, info, warn, error)", c.LogLevel)

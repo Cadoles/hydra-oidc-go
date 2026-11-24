@@ -2,12 +2,10 @@
 // redirects WITHOUT a server-side session, mirroring hydra-sql-go's stateless
 // design. Short-lived flow/logout state rides in encrypted, signed cookies. The
 // upstream id_token (needed as id_token_hint at a possibly-much-later logout)
-// rides in an encrypted cookie too, unless a Redis Store is configured — then
-// the cookie holds only an opaque session id and the token lives in Redis.
+// rides in an encrypted cookie too.
 package flowstate
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -46,13 +44,6 @@ type LogoutState struct {
 	ErrorMessage    string
 }
 
-// Store is the optional backend for the upstream id_token (Redis in prod).
-type Store interface {
-	Put(ctx context.Context, key, value string, ttl time.Duration) error
-	Get(ctx context.Context, key string) (string, error)
-	Del(ctx context.Context, key string) error
-}
-
 // flowTTL is how long the login and logout round-trips to the provider may
 // take.
 const flowTTL = 10 * time.Minute
@@ -65,22 +56,20 @@ type Manager struct {
 	ttls       map[string]time.Duration
 	secure     bool
 	cookiePath string
-	store      Store
 }
 
 // New derives hash+block keys from appSecret (so cookies are signed AND
-// encrypted) and configures the manager. store may be nil (cookie-only).
-// sessionTTL is the lifetime of the upstream session: its cookie, and its
-// entry in the store.
-func New(appSecret, cookiePath string, secure bool, store Store, sessionTTL time.Duration) *Manager {
-	return newManager(appSecret, cookiePath, secure, store, map[string]time.Duration{
+// encrypted) and configures the manager. sessionTTL is the lifetime of the
+// upstream session, the cookie that holds the provider's id_token.
+func New(appSecret, cookiePath string, secure bool, sessionTTL time.Duration) *Manager {
+	return newManager(appSecret, cookiePath, secure, map[string]time.Duration{
 		flowCookie:    flowTTL,
 		logoutCookie:  flowTTL,
 		sessionCookie: sessionTTL,
 	})
 }
 
-func newManager(appSecret, cookiePath string, secure bool, store Store, ttls map[string]time.Duration) *Manager {
+func newManager(appSecret, cookiePath string, secure bool, ttls map[string]time.Duration) *Manager {
 	hashKey := sha256.Sum256([]byte("hydra-oidc-go/hash:" + appSecret))
 	blockKey := sha256.Sum256([]byte("hydra-oidc-go/block:" + appSecret)) // 32 bytes → AES-256
 	codecs := make(map[string]*securecookie.SecureCookie, len(ttls))
@@ -95,7 +84,6 @@ func newManager(appSecret, cookiePath string, secure bool, store Store, ttls map
 		ttls:       ttls,
 		secure:     secure,
 		cookiePath: cookiePath,
-		store:      store,
 	}
 }
 
@@ -133,43 +121,24 @@ func (m *Manager) ClearLogout(w http.ResponseWriter) { m.clear(w, logoutCookie) 
 
 // --- upstream session (callback → logout), carries the id_token ---
 
-// SetSession persists the upstream id_token. With a Store it writes the token
-// to Redis under a random id and puts only that id in the cookie; otherwise the
-// (encrypted) token rides in the cookie directly.
-func (m *Manager) SetSession(ctx context.Context, w http.ResponseWriter, idToken string) error {
-	value := idToken
-	if m.store != nil {
-		sid := RandString(24)
-		if err := m.store.Put(ctx, sid, idToken, m.ttls[sessionCookie]); err != nil {
-			return err
-		}
-		value = sid
-	}
-	return m.set(w, sessionCookie, value)
+// SetSession keeps the upstream id_token, encrypted, in the session cookie. It
+// fails for a token too large for a cookie.
+func (m *Manager) SetSession(w http.ResponseWriter, idToken string) error {
+	return m.set(w, sessionCookie, idToken)
 }
 
-// ReadSession returns the upstream id_token, or "" when absent.
-func (m *Manager) ReadSession(ctx context.Context, r *http.Request) (string, error) {
-	var value string
-	if err := m.read(r, sessionCookie, &value); err != nil {
+// ReadSession returns the upstream id_token, or an error when the cookie is
+// absent, older than its lifetime or not ours.
+func (m *Manager) ReadSession(r *http.Request) (string, error) {
+	var idToken string
+	if err := m.read(r, sessionCookie, &idToken); err != nil {
 		return "", err
 	}
-	if m.store == nil {
-		return value, nil
-	}
-	return m.store.Get(ctx, value)
+	return idToken, nil
 }
 
-// ClearSession removes the cookie and any Redis entry.
-func (m *Manager) ClearSession(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-	if m.store != nil {
-		var sid string
-		if err := m.read(r, sessionCookie, &sid); err == nil && sid != "" {
-			_ = m.store.Del(ctx, sid)
-		}
-	}
-	m.clear(w, sessionCookie)
-}
+// ClearSession removes the session cookie.
+func (m *Manager) ClearSession(w http.ResponseWriter) { m.clear(w, sessionCookie) }
 
 // --- helpers ---
 

@@ -12,12 +12,12 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/RudyMCh/hydra-oidc-go/internal/config"
-	"github.com/RudyMCh/hydra-oidc-go/internal/flowstate"
-	"github.com/RudyMCh/hydra-oidc-go/internal/hydra"
-	"github.com/RudyMCh/hydra-oidc-go/internal/metrics"
-	"github.com/RudyMCh/hydra-oidc-go/internal/obs"
-	"github.com/RudyMCh/hydra-oidc-go/internal/upstream"
+	"github.com/Cadoles/hydra-oidc-go/internal/config"
+	"github.com/Cadoles/hydra-oidc-go/internal/flowstate"
+	"github.com/Cadoles/hydra-oidc-go/internal/hydra"
+	"github.com/Cadoles/hydra-oidc-go/internal/metrics"
+	"github.com/Cadoles/hydra-oidc-go/internal/obs"
+	"github.com/Cadoles/hydra-oidc-go/internal/upstream"
 )
 
 // Route paths. The returns from the provider are served at CALLBACK_PATH and

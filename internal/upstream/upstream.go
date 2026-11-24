@@ -20,7 +20,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
-	"github.com/RudyMCh/hydra-oidc-go/internal/config"
+	"github.com/Cadoles/hydra-oidc-go/internal/config"
 )
 
 // ErrUserInfoInvalid is a userinfo answer the provider did send, but that

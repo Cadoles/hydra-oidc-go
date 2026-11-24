@@ -9,11 +9,11 @@ import (
 
 	"golang.org/x/oauth2"
 
-	"github.com/RudyMCh/hydra-oidc-go/internal/flowstate"
-	"github.com/RudyMCh/hydra-oidc-go/internal/hydra"
-	"github.com/RudyMCh/hydra-oidc-go/internal/metrics"
-	"github.com/RudyMCh/hydra-oidc-go/internal/oidc"
-	"github.com/RudyMCh/hydra-oidc-go/internal/upstream"
+	"github.com/Cadoles/hydra-oidc-go/internal/flowstate"
+	"github.com/Cadoles/hydra-oidc-go/internal/hydra"
+	"github.com/Cadoles/hydra-oidc-go/internal/metrics"
+	"github.com/Cadoles/hydra-oidc-go/internal/oidc"
+	"github.com/Cadoles/hydra-oidc-go/internal/upstream"
 )
 
 // protocolClaims are OIDC/JWT envelope claims that must NOT be copied from the
@@ -182,7 +182,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 
 	// Persist the upstream id_token for RP-initiated logout (id_token_hint),
 	// once Hydra has the login: a session is kept for an accepted login only.
-	if err := s.Flow.SetSession(r.Context(), w, rawIDToken); err != nil {
+	if err := s.Flow.SetSession(w, rawIDToken); err != nil {
 		// The user is signed in; only the logout will not reach the provider.
 		s.Logger.Error("could not persist the upstream session: the logout will not go through the provider", "err", err)
 		s.Reporter.Capture(err)
@@ -288,7 +288,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	idToken, _ := s.Flow.ReadSession(r.Context(), r) // best-effort
+	idToken, _ := s.Flow.ReadSession(r) // best-effort
 	if idToken != "" && s.Upstream.CanLogout() {
 		state := flowstate.RandString(24)
 		if err := s.Flow.SetLogout(w, flowstate.LogoutState{LogoutChallenge: challenge, State: state}); err != nil {
@@ -307,7 +307,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		s.hydraFailed(w, r, "could not accept logout", err)
 		return
 	}
-	s.Flow.ClearSession(r.Context(), w, r)
+	s.Flow.ClearSession(w)
 	s.Logger.Info("logout accepted, without the provider", "challenge", challenge)
 	http.Redirect(w, r, redirect, http.StatusSeeOther)
 }
@@ -330,7 +330,7 @@ func (s *Server) logoutCallback(w http.ResponseWriter, r *http.Request) {
 		// The logout that follows a failed login (failAfterProvider): the
 		// provider's session is ended, the error is shown. Already logged.
 		s.Flow.ClearLogout(w)
-		s.Flow.ClearSession(r.Context(), w, r)
+		s.Flow.ClearSession(w)
 		s.sendError(w, r, ls.ErrorStatus, ls.ErrorMessage)
 		return
 	}
@@ -340,7 +340,7 @@ func (s *Server) logoutCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Flow.ClearLogout(w)
-	s.Flow.ClearSession(r.Context(), w, r)
+	s.Flow.ClearSession(w)
 	s.Logger.Info("logout accepted", "challenge", ls.LogoutChallenge)
 	http.Redirect(w, r, redirect, http.StatusSeeOther)
 }

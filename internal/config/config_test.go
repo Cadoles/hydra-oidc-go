@@ -90,13 +90,13 @@ func TestValidateSessionLifetime(t *testing.T) {
 		t.Run(value, func(t *testing.T) {
 			baseEnv(t)
 			t.Setenv("OIDC_ISSUER", "https://idp")
-			t.Setenv("HYDRA_OIDC_REDIS_TTL", value)
+			t.Setenv("SESSION_TTL", value)
 			cfg, err := Load()
 			if (err == nil) != ok {
 				t.Fatalf("Load: err = %v, want accepted: %v", err, ok)
 			}
-			if ok && cfg.RedisTTL.Seconds() < 1 {
-				t.Errorf("RedisTTL = %v", cfg.RedisTTL)
+			if ok && cfg.SessionTTL.Seconds() < 1 {
+				t.Errorf("SessionTTL = %v", cfg.SessionTTL)
 			}
 		})
 	}

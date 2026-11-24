@@ -1,4 +1,4 @@
-module github.com/RudyMCh/hydra-oidc-go
+module github.com/Cadoles/hydra-oidc-go
 
 go 1.26.4
 
@@ -14,7 +14,6 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/ory/hydra-client-go/v26 v26.2.0
 	github.com/prometheus/client_golang v1.23.2
-	github.com/redis/go-redis/v9 v9.21.0
 	golang.org/x/oauth2 v0.36.0
 )
 
@@ -27,7 +26,6 @@ require (
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
-	go.uber.org/atomic v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20231108232855-2478ac86f678 // indirect
 	golang.org/x/mod v0.43.0 // indirect

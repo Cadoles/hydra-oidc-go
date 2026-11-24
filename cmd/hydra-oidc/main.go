@@ -1,8 +1,8 @@
 // Command hydra-oidc is an Ory Hydra login app that bridges Hydra's
 // login/consent/logout flow to an upstream OIDC provider (it acts as a Relying
 // Party to a third-party IdP). It is stateless: no server-side session is kept;
-// cross-redirect state travels in encrypted cookies (optionally Redis for the
-// upstream id_token used at logout).
+// cross-redirect state travels in encrypted cookies, the upstream id_token used
+// at logout included.
 package main
 
 import (
@@ -20,13 +20,13 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/RudyMCh/hydra-oidc-go/internal/config"
-	"github.com/RudyMCh/hydra-oidc-go/internal/flowstate"
-	"github.com/RudyMCh/hydra-oidc-go/internal/httpx"
-	"github.com/RudyMCh/hydra-oidc-go/internal/hydra"
-	"github.com/RudyMCh/hydra-oidc-go/internal/metrics"
-	"github.com/RudyMCh/hydra-oidc-go/internal/obs"
-	"github.com/RudyMCh/hydra-oidc-go/internal/upstream"
+	"github.com/Cadoles/hydra-oidc-go/internal/config"
+	"github.com/Cadoles/hydra-oidc-go/internal/flowstate"
+	"github.com/Cadoles/hydra-oidc-go/internal/httpx"
+	"github.com/Cadoles/hydra-oidc-go/internal/hydra"
+	"github.com/Cadoles/hydra-oidc-go/internal/metrics"
+	"github.com/Cadoles/hydra-oidc-go/internal/obs"
+	"github.com/Cadoles/hydra-oidc-go/internal/upstream"
 )
 
 // version is the release, set at build time (-ldflags -X main.version=…).
@@ -84,7 +84,8 @@ func run() error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.SlogLevel()}))
 	slog.SetDefault(logger)
 	logger.Info("starting", "version", cfg.Version, "log_level", cfg.SlogLevel().String(),
-		"callback_path", cfg.CallbackPath, "logout_callback_path", cfg.LogoutCallbackPath)
+		"callback_path", cfg.CallbackPath, "logout_callback_path", cfg.LogoutCallbackPath,
+		"session_ttl", cfg.SessionTTL.String())
 
 	reporter, flush, err := obs.Init(cfg.SentryDSN, cfg.SentryEnvironment, cfg.Version)
 	if err != nil {
@@ -99,17 +100,7 @@ func run() error {
 		return fmt.Errorf("init upstream oidc: %w", err)
 	}
 
-	var store flowstate.Store
-	if cfg.RedisDSN != "" {
-		store, err = flowstate.NewRedisStore(cfg.RedisDSN, cfg.RedisPrefix)
-		if err != nil {
-			return fmt.Errorf("init redis: %w", err)
-		}
-		logger.Info("upstream id_token persisted in redis", "ttl", cfg.RedisTTL)
-	} else {
-		logger.Info("upstream id_token persisted in encrypted cookie (stateless)")
-	}
-	flow := flowstate.New(cfg.AppSecret, cfg.CookiePath, cfg.HTTPS(), store, cfg.RedisTTL)
+	flow := flowstate.New(cfg.AppSecret, cfg.CookiePath, cfg.HTTPS(), cfg.SessionTTL)
 
 	srvHandler := httpx.New(httpx.Deps{
 		Config:   cfg,

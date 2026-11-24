@@ -1,7 +1,6 @@
 package httpx
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -11,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RudyMCh/hydra-oidc-go/internal/config"
-	"github.com/RudyMCh/hydra-oidc-go/internal/hydra"
-	"github.com/RudyMCh/hydra-oidc-go/internal/oidctest"
+	"github.com/Cadoles/hydra-oidc-go/internal/config"
+	"github.com/Cadoles/hydra-oidc-go/internal/hydra"
+	"github.com/Cadoles/hydra-oidc-go/internal/oidctest"
 )
 
 const (
@@ -475,7 +474,7 @@ func startLogout(t *testing.T, fh *fakeHydra) (*Server, []*http.Cookie, string) 
 		cfg.OIDCLogoutEndpoint = "https://idp.test/logout?%s"
 	})
 	seed := httptest.NewRecorder()
-	if err := flow.SetSession(context.Background(), seed, "UPSTREAM_ID_TOKEN"); err != nil {
+	if err := flow.SetSession(seed, "UPSTREAM_ID_TOKEN"); err != nil {
 		t.Fatalf("seed session: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/logout?logout_challenge=logout-1", nil)

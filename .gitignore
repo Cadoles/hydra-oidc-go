@@ -1,3 +1,5 @@
 .env
+# The private key of the cosign pair: never in the repository.
+cosign.key
 /hydra-oidc
 *.cdx.json
