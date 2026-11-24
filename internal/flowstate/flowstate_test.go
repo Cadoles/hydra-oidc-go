@@ -106,3 +106,73 @@ func TestReadFlowMissing(t *testing.T) {
 		t.Errorf("expected error reading a missing flow cookie")
 	}
 }
+
+// Each cookie has its own lifetime: the upstream session outlives the flow
+// cookies, and a flow cookie past its lifetime is refused whatever the
+// browser sends.
+func TestCookieLifetimes(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("the session outlives the flow", func(t *testing.T) {
+		t.Parallel()
+		m := newManager(secret, "/", false, nil, map[string]time.Duration{
+			flowCookie: time.Second, logoutCookie: time.Second, sessionCookie: time.Hour,
+		})
+		rec := httptest.NewRecorder()
+		if err := m.SetFlow(rec, FlowState{State: "st"}); err != nil {
+			t.Fatalf("SetFlow: %v", err)
+		}
+		if err := m.SetLogout(rec, LogoutState{State: "st"}); err != nil {
+			t.Fatalf("SetLogout: %v", err)
+		}
+		if err := m.SetSession(ctx, rec, "the.id.token"); err != nil {
+			t.Fatalf("SetSession: %v", err)
+		}
+		time.Sleep(2100 * time.Millisecond)
+		req := replay(rec)
+		if _, err := m.ReadFlow(req); err == nil {
+			t.Errorf("a flow cookie past its lifetime must be refused")
+		}
+		if _, err := m.ReadLogout(req); err == nil {
+			t.Errorf("a logout cookie past its lifetime must be refused")
+		}
+		if got, err := m.ReadSession(ctx, req); err != nil || got != "the.id.token" {
+			t.Errorf("the session must still be readable: %q, %v", got, err)
+		}
+	})
+
+	t.Run("the session ends at its own lifetime", func(t *testing.T) {
+		t.Parallel()
+		m := newManager(secret, "/", false, nil, map[string]time.Duration{
+			flowCookie: time.Hour, logoutCookie: time.Hour, sessionCookie: time.Second,
+		})
+		rec := httptest.NewRecorder()
+		if err := m.SetSession(ctx, rec, "the.id.token"); err != nil {
+			t.Fatalf("SetSession: %v", err)
+		}
+		time.Sleep(2100 * time.Millisecond)
+		if got, err := m.ReadSession(ctx, replay(rec)); err == nil {
+			t.Errorf("a session cookie past its lifetime must be refused, got %q", got)
+		}
+	})
+}
+
+// The lifetimes New sets: the browser is told the same as the codec enforces.
+func TestNewLifetimes(t *testing.T) {
+	m := New(secret, "/", false, nil, 2*time.Hour)
+	rec := httptest.NewRecorder()
+	_ = m.SetFlow(rec, FlowState{})
+	_ = m.SetLogout(rec, LogoutState{})
+	_ = m.SetSession(context.Background(), rec, "tok")
+	want := map[string]int{flowCookie: 600, logoutCookie: 600, sessionCookie: 7200}
+	for _, c := range rec.Result().Cookies() {
+		if c.MaxAge != want[c.Name] {
+			t.Errorf("%s: MaxAge = %d, want %d", c.Name, c.MaxAge, want[c.Name])
+		}
+		delete(want, c.Name)
+	}
+	if len(want) != 0 {
+		t.Errorf("cookies not set: %v", want)
+	}
+}

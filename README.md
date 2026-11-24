@@ -11,25 +11,37 @@ authenticates against a SQL database).
 2. The app generates `state`, `nonce` and a PKCE verifier, stashes them in an encrypted cookie, and
    redirects the browser to the upstream provider's authorization endpoint.
 3. The provider redirects back to `GET /callback`. The app validates `state`, exchanges the code
-   (with PKCE), verifies the `id_token` (signature via JWKS, audience, expiry, nonce), optionally
-   fetches userinfo (JSON or JWT), and **accepts the Hydra login** with `subject = upstream sub` and
-   the upstream claims carried in Hydra's `context`.
+   (with PKCE), verifies the `id_token` (signature via JWKS, audience, expiry, nonce), fetches
+   userinfo (JSON or JWT) unless `OIDC_SKIP_USERINFO` is set, and **accepts the Hydra login** with
+   `subject = upstream sub` and the upstream claims carried in Hydra's `context`. The userinfo
+   `sub` must be the `id_token`'s, and a userinfo sent as a JWT is verified with the provider's
+   keys (unless `OIDC_VERIFY_SIGNATURE` is off). A userinfo that fails, or does not pass these
+   checks, fails the login.
 4. `GET /consent` **auto-accepts** (the bridge has no consent UI), emitting the upstream claims as
    `id_token` claims (optionally scope-filtered).
 5. `GET /logout?logout_challenge=…` performs RP-initiated logout at the upstream provider (using the
    stored upstream `id_token` as `id_token_hint`), then `GET /logout/callback` accepts the Hydra
-   logout.
+   logout, once the `state` the provider returns is the one it was sent.
+
+A challenge already used or expired (the browser's back button, a double click) is answered by
+Hydra, or the dispatcher, with a 410 and a `redirect_to`: the app follows it, as it follows the
+answer of an accept.
 
 ## Stateless design
 
 No server-side session. Cross-redirect state travels in **encrypted, signed cookies**
 (`gorilla/securecookie`, keys derived from `APP_SECRET`):
 
-- `oidc_flow` — `state`, `nonce`, PKCE verifier, login challenge (login → callback, ~10 min).
+- `oidc_flow` — `state`, `nonce`, PKCE verifier, login challenge (login → callback, 10 min). It is
+  kept after the login, until it expires: the back button returns to the provider, which answers
+  with the same `state`.
 - `oidc_session` — the upstream `id_token`, needed as `id_token_hint` at logout. Held in the cookie
   by default; when `REDIS_DSN` is set it is stored in Redis under an opaque id and the cookie holds
-  only that id.
-- `oidc_logout` — logout challenge + state (logout → logout callback, ~10 min).
+  only that id. It lasts `HYDRA_OIDC_REDIS_TTL` in both cases: after it, a logout no longer goes
+  through the provider.
+- `oidc_logout` — logout challenge + state (logout → logout callback, 10 min).
+
+Each cookie is refused once older than its own lifetime, whatever the browser sends.
 
 ## Differences vs the original PHP app
 
@@ -37,7 +49,7 @@ No server-side session. Cross-redirect state travels in **encrypted, signed cook
 - **id_token signatures are verified** (the PHP app only checked the nonce) and **PKCE is used** —
   both default-on and each disableable per-provider (`OIDC_VERIFY_SIGNATURE`, `OIDC_PKCE_ENABLED`).
 - Stateless cookies instead of a Redis session (Redis is optional, only for the logout id_token).
-- The JWT-encoded userinfo quirk (FranceConnect) is preserved.
+- The JWT-encoded userinfo (FranceConnect) is supported, its signature verified.
 
 ## Configuration (environment variables)
 
@@ -59,7 +71,7 @@ No server-side session. Cross-redirect state travels in **encrypted, signed cook
 | `PARAMS_TO_INSERT` | | JSON object of extra authorize params, e.g. `{"acr_values":"eidas1"}` |
 | `PARAMS_TO_DELETE` | | JSON array of authorize params to strip |
 | `OIDC_PKCE_ENABLED` | `true` | Disable for providers that reject PKCE |
-| `OIDC_VERIFY_SIGNATURE` | `true` | Disable only for non-compliant providers |
+| `OIDC_VERIFY_SIGNATURE` | `true` | Signature of the id_token, and of a userinfo sent as a JWT. Disable only for non-compliant providers |
 | `OIDC_ID_TOKEN_SIGNING_ALGS` | | Comma-separated allow-list (e.g. `RS256,ES256`) |
 | `OIDC_SKIP_USERINFO` | `false` | Skip the userinfo call (claims from the id_token only) |
 | `CONSENT_AUTO_ACCEPT` | `true` | The bridge has no consent UI; keep this on |
@@ -71,7 +83,7 @@ No server-side session. Cross-redirect state travels in **encrypted, signed cook
 | `REDIRECT_ON_ERROR_URL` | | On error, redirect here with `?status_code&message`; else a plain status |
 | `REDIS_DSN` | empty | Optional; stores the upstream id_token for logout (else cookie) |
 | `HYDRA_OIDC_REDIS_PREFIX` | | Redis key prefix |
-| `HYDRA_OIDC_REDIS_TTL` | `3600` | Upstream-session TTL, in seconds |
+| `HYDRA_OIDC_REDIS_TTL` | `3600` | Upstream-session TTL, in seconds: the cookie's, and the Redis entry's |
 | `TRUSTED_PROXIES` | | CIDRs/IPs trusted for `X-Forwarded-For` |
 | `SENTRY_DSN` / `SENTRY_ENVIRONMENT` | | Optional error reporting |
 | `LISTEN_ADDR` | `:8080` | |

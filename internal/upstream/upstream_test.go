@@ -2,15 +2,8 @@ package upstream
 
 import (
 	"context"
-	"crypto"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
-	"math/big"
+	"errors"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"testing"
 	"time"
@@ -18,58 +11,21 @@ import (
 	"golang.org/x/oauth2"
 
 	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/config"
+	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/oidctest"
 )
 
-// --- a tiny RS256 IdP for tests (JWKS + signer), no external JWT lib ---
-
-type testIDP struct {
-	key    *rsa.PrivateKey
-	server *httptest.Server
-}
-
-func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
-
-func (idp *testIDP) sign(claims map[string]any) string {
-	header := b64([]byte(`{"alg":"RS256","typ":"JWT","kid":"test"}`))
-	payloadJSON, _ := json.Marshal(claims)
-	signingInput := header + "." + b64(payloadJSON)
-	h := sha256.Sum256([]byte(signingInput))
-	sig, _ := rsa.SignPKCS1v15(rand.Reader, idp.key, crypto.SHA256, h[:])
-	return signingInput + "." + b64(sig)
-}
-
-func newTestIDP(t *testing.T) *testIDP {
-	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("rsa key: %v", err)
-	}
-	idp := &testIDP{key: key}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) {
-		jwk := map[string]any{
-			"kty": "RSA", "kid": "test", "alg": "RS256", "use": "sig",
-			"n": b64(key.N.Bytes()),
-			"e": b64(big.NewInt(int64(key.E)).Bytes()),
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{jwk}})
-	})
-	idp.server = httptest.NewServer(mux)
-	t.Cleanup(idp.server.Close)
-	return idp
-}
-
-func testClient(t *testing.T, idp *testIDP, mutate func(*config.Config)) *Client {
+// testClient builds a client on explicit endpoints (no discovery), signatures
+// verified.
+func testClient(t *testing.T, idp *oidctest.Provider, mutate func(*config.Config)) *Client {
 	t.Helper()
 	cfg := &config.Config{
-		ClientID:              "client-x",
+		ClientID:              oidctest.ClientID,
 		ClientSecret:          "secret",
 		BaseURL:               "https://app.test",
-		OIDCAuthorizeEndpoint: idp.server.URL + "/authorize",
-		OIDCTokenEndpoint:     idp.server.URL + "/token",
-		OIDCJWKSEndpoint:      idp.server.URL + "/jwks",
-		OIDCUserinfoEndpoint:  idp.server.URL + "/userinfo",
+		OIDCAuthorizeEndpoint: idp.URL + "/authorize",
+		OIDCTokenEndpoint:     idp.URL + "/token",
+		OIDCJWKSEndpoint:      idp.URL + "/jwks",
+		OIDCUserinfoEndpoint:  idp.URL + "/userinfo",
 		Scopes:                []string{"openid", "email"},
 		PKCEEnabled:           true,
 		VerifySignature:       true,
@@ -84,8 +40,25 @@ func testClient(t *testing.T, idp *testIDP, mutate func(*config.Config)) *Client
 	return c
 }
 
+func idClaims(mutate func(map[string]any)) map[string]any {
+	now := time.Now()
+	claims := map[string]any{
+		"iss": "https://idp.test", "aud": oidctest.ClientID, "sub": "user-123",
+		"nonce": "nonce-ok", "exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
+		"email": "u@example.test", "given_name": "Ada",
+	}
+	if mutate != nil {
+		mutate(claims)
+	}
+	return claims
+}
+
+func withIDToken(raw string) *oauth2.Token {
+	return (&oauth2.Token{AccessToken: "at"}).WithExtra(map[string]any{"id_token": raw})
+}
+
 func TestAuthCodeURL(t *testing.T) {
-	idp := newTestIDP(t)
+	idp := oidctest.New(t)
 	c := testClient(t, idp, func(cfg *config.Config) {
 		cfg.ParamsToInsert = map[string]string{"acr_values": "eidas1"}
 	})
@@ -96,7 +69,7 @@ func TestAuthCodeURL(t *testing.T) {
 	}
 	q := u.Query()
 	checks := map[string]string{
-		"client_id":             "client-x",
+		"client_id":             oidctest.ClientID,
 		"state":                 "state-1",
 		"nonce":                 "nonce-1",
 		"redirect_uri":          "https://app.test/callback",
@@ -118,15 +91,10 @@ func TestAuthCodeURL(t *testing.T) {
 }
 
 func TestVerifyIDToken(t *testing.T) {
-	idp := newTestIDP(t)
+	idp := oidctest.New(t)
 	c := testClient(t, idp, nil)
-	now := time.Now()
-	tokenStr := idp.sign(map[string]any{
-		"iss": "https://idp.test", "aud": "client-x", "sub": "user-123",
-		"nonce": "nonce-ok", "exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
-		"email": "u@example.test", "given_name": "Ada",
-	})
-	tok := (&oauth2.Token{AccessToken: "at"}).WithExtra(map[string]any{"id_token": tokenStr})
+	tokenStr := idp.Sign(t, "RS256", idClaims(nil))
+	tok := withIDToken(tokenStr)
 
 	raw, sub, claims, err := c.VerifyIDToken(context.Background(), tok, "nonce-ok")
 	if err != nil {
@@ -148,52 +116,142 @@ func TestVerifyIDToken(t *testing.T) {
 	}
 }
 
-func TestVerifyIDTokenRejectsBadAudience(t *testing.T) {
-	idp := newTestIDP(t)
-	c := testClient(t, idp, nil)
-	now := time.Now()
-	tok := (&oauth2.Token{}).WithExtra(map[string]any{"id_token": idp.sign(map[string]any{
-		"iss": "https://idp.test", "aud": "someone-else", "sub": "u",
-		"nonce": "n", "exp": now.Add(time.Hour).Unix(),
-	})})
-	if _, _, _, err := c.VerifyIDToken(context.Background(), tok, "n"); err == nil {
-		t.Errorf("expected audience mismatch to fail verification")
+func TestVerifyIDTokenRejects(t *testing.T) {
+	idp := oidctest.New(t)
+	cases := []struct {
+		name  string
+		algs  []string
+		token func() string
+	}{
+		{"another audience", nil, func() string {
+			return idp.Sign(t, "RS256", idClaims(func(c map[string]any) { c["aud"] = "someone-else" }))
+		}},
+		{"expired", nil, func() string {
+			return idp.Sign(t, "RS256", idClaims(func(c map[string]any) { c["exp"] = time.Now().Add(-time.Hour).Unix() }))
+		}},
+		{"a key the provider does not publish", nil, func() string {
+			return idp.SignForeign(t, idClaims(nil))
+		}},
+		// Without discovery nor OIDC_ID_TOKEN_SIGNING_ALGS, RS256 only.
+		{"ES256 not allowed", nil, func() string {
+			return idp.Sign(t, "ES256", idClaims(nil))
+		}},
+		{"RS256 when ES256 alone is allowed", []string{"ES256"}, func() string {
+			return idp.Sign(t, "RS256", idClaims(nil))
+		}},
+		{"no id_token", nil, func() string { return "" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testClient(t, idp, func(cfg *config.Config) { cfg.IDTokenSigningAlgs = tc.algs })
+			if _, _, _, err := c.VerifyIDToken(context.Background(), withIDToken(tc.token()), "nonce-ok"); err == nil {
+				t.Errorf("expected the id_token to be refused")
+			}
+		})
 	}
 }
 
-func TestUserInfoJSONAndJWT(t *testing.T) {
-	idp := newTestIDP(t)
+func TestVerifyIDTokenES256(t *testing.T) {
+	idp := oidctest.New(t)
+	c := testClient(t, idp, func(cfg *config.Config) { cfg.IDTokenSigningAlgs = []string{"ES256"} })
+	_, sub, _, err := c.VerifyIDToken(context.Background(), withIDToken(idp.Sign(t, "ES256", idClaims(nil))), "nonce-ok")
+	if err != nil || sub != "user-123" {
+		t.Fatalf("VerifyIDToken: sub=%q err=%v", sub, err)
+	}
+}
 
-	t.Run("json", func(t *testing.T) {
-		c := testClient(t, idp, func(cfg *config.Config) {
-			cfg.OIDCUserinfoEndpoint = jsonUserinfoServer(t, `{"sub":"u","email":"j@x.test"}`)
-		})
-		got, err := c.UserInfo(context.Background(), &oauth2.Token{AccessToken: "at"})
-		if err != nil {
-			t.Fatalf("UserInfo: %v", err)
-		}
-		if got["email"] != "j@x.test" {
-			t.Errorf("json userinfo: %#v", got)
-		}
+// With discovery the issuer is checked, and the algorithms are the provider's.
+func TestVerifyIDTokenDiscovery(t *testing.T) {
+	idp := oidctest.New(t)
+	c := testClient(t, idp, func(cfg *config.Config) {
+		cfg.OIDCIssuer = idp.URL
+		cfg.OIDCAuthorizeEndpoint, cfg.OIDCTokenEndpoint, cfg.OIDCJWKSEndpoint, cfg.OIDCUserinfoEndpoint = "", "", "", ""
 	})
+	good := idp.Sign(t, "ES256", idClaims(func(c map[string]any) { c["iss"] = idp.URL }))
+	if _, _, _, err := c.VerifyIDToken(context.Background(), withIDToken(good), "nonce-ok"); err != nil {
+		t.Fatalf("VerifyIDToken: %v", err)
+	}
+	other := idp.Sign(t, "ES256", idClaims(nil)) // iss https://idp.test
+	if _, _, _, err := c.VerifyIDToken(context.Background(), withIDToken(other), "nonce-ok"); err == nil {
+		t.Errorf("expected another issuer to be refused")
+	}
+	if !c.UserInfoEnabled() {
+		t.Errorf("the userinfo endpoint of the discovery document should be used")
+	}
+}
 
-	t.Run("jwt", func(t *testing.T) {
-		jwt := idp.sign(map[string]any{"sub": "u", "email": "jwt@x.test"})
-		c := testClient(t, idp, func(cfg *config.Config) {
-			cfg.OIDCUserinfoEndpoint = jwtUserinfoServer(t, jwt)
+func TestUserInfo(t *testing.T) {
+	idp := oidctest.New(t)
+	ctx := context.Background()
+	tok := &oauth2.Token{AccessToken: "at"}
+	claims := map[string]any{"sub": "user-123", "email": "ui@x.test"}
+
+	cases := []struct {
+		name     string
+		verify   bool
+		answer   http.HandlerFunc
+		wantErr  bool
+		invalid  bool // ErrUserInfoInvalid
+		wantMail string
+	}{
+		{name: "json", verify: true, answer: oidctest.JSONUserInfo(claims), wantMail: "ui@x.test"},
+		{name: "jwt RS256", verify: true, answer: oidctest.JWTUserInfo(idp.Sign(t, "RS256", claims)), wantMail: "ui@x.test"},
+		{name: "jwt ES256", verify: true, answer: oidctest.JWTUserInfo(idp.Sign(t, "ES256", claims)), wantMail: "ui@x.test"},
+		{name: "jwt of another key", verify: true, answer: oidctest.JWTUserInfo(idp.SignForeign(t, claims)), wantErr: true, invalid: true},
+		{name: "jwt of another key, verification off", verify: false, answer: oidctest.JWTUserInfo(idp.SignForeign(t, claims)), wantMail: "ui@x.test"},
+		{name: "json, another sub", verify: true, answer: oidctest.JSONUserInfo(map[string]any{"sub": "someone-else", "email": "e@x.test"}), wantErr: true, invalid: true},
+		{name: "jwt, another sub", verify: true, answer: oidctest.JWTUserInfo(idp.Sign(t, "RS256", map[string]any{"sub": "someone-else"})), wantErr: true, invalid: true},
+		{name: "another sub, verification off", verify: false, answer: oidctest.JSONUserInfo(map[string]any{"sub": "someone-else"}), wantErr: true, invalid: true},
+		{name: "no sub", verify: true, answer: oidctest.JSONUserInfo(map[string]any{"email": "e@x.test"}), wantErr: true, invalid: true},
+		{name: "status 500", verify: true, answer: func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) }, wantErr: true},
+		{name: "neither JSON nor JWT", verify: true, answer: func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("oops")) }, wantErr: true, invalid: true},
+		{name: "neither JSON nor JWT, verification off", verify: false, answer: func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("oops")) }, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			idp.Set(func(p *oidctest.Provider) { p.UserInfo = tc.answer })
+			c := testClient(t, idp, func(cfg *config.Config) { cfg.VerifySignature = tc.verify })
+			got, err := c.UserInfo(ctx, tok, "user-123")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("UserInfo: err = %v, want an error: %v", err, tc.wantErr)
+			}
+			if errors.Is(err, ErrUserInfoInvalid) != tc.invalid {
+				t.Errorf("err = %v, want ErrUserInfoInvalid: %v", err, tc.invalid)
+			}
+			if tc.wantErr {
+				if got != nil {
+					t.Errorf("no claims expected with an error, got %#v", got)
+				}
+				return
+			}
+			if got["email"] != tc.wantMail {
+				t.Errorf("claims = %#v", got)
+			}
 		})
-		got, err := c.UserInfo(context.Background(), &oauth2.Token{AccessToken: "at"})
-		if err != nil {
-			t.Fatalf("UserInfo (jwt): %v", err)
-		}
-		if got["email"] != "jwt@x.test" {
-			t.Errorf("jwt userinfo decode: %#v", got)
-		}
-	})
+	}
+}
+
+func TestUserInfoDisabled(t *testing.T) {
+	idp := oidctest.New(t)
+	for name, mutate := range map[string]func(*config.Config){
+		"skipped":     func(cfg *config.Config) { cfg.SkipUserinfo = true },
+		"no endpoint": func(cfg *config.Config) { cfg.OIDCUserinfoEndpoint = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := testClient(t, idp, mutate)
+			got, err := c.UserInfo(context.Background(), &oauth2.Token{AccessToken: "at"}, "user-123")
+			if got != nil || err != nil {
+				t.Errorf("UserInfo = %#v, %v; want nil, nil", got, err)
+			}
+			if idp.Hit("/userinfo") != 0 {
+				t.Errorf("the userinfo endpoint must not be called")
+			}
+		})
+	}
 }
 
 func TestLogoutURL(t *testing.T) {
-	idp := newTestIDP(t)
+	idp := oidctest.New(t)
 
 	tmpl := testClient(t, idp, func(cfg *config.Config) {
 		cfg.OIDCLogoutEndpoint = "https://idp.test/logout?%s"
@@ -217,38 +275,4 @@ func TestLogoutURL(t *testing.T) {
 	if none.CanLogout() || none.LogoutURL("x", "y", "z") != "" {
 		t.Errorf("no logout endpoint should yield empty URL and CanLogout()=false")
 	}
-}
-
-func TestDecodeJWTPayload(t *testing.T) {
-	payload := b64([]byte(`{"sub":"abc","email":"e@x"}`))
-	got, err := decodeJWTPayload("header." + payload + ".sig")
-	if err != nil {
-		t.Fatalf("decodeJWTPayload: %v", err)
-	}
-	if got["sub"] != "abc" {
-		t.Errorf("decoded payload: %#v", got)
-	}
-	if _, err := decodeJWTPayload("not-a-jwt"); err == nil {
-		t.Errorf("expected error for non-JWT")
-	}
-}
-
-func jsonUserinfoServer(t *testing.T, body string) string {
-	t.Helper()
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(body))
-	}))
-	t.Cleanup(s.Close)
-	return s.URL
-}
-
-func jwtUserinfoServer(t *testing.T, jwt string) string {
-	t.Helper()
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/jwt")
-		_, _ = w.Write([]byte(jwt))
-	}))
-	t.Cleanup(s.Close)
-	return s.URL
 }

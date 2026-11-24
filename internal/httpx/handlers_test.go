@@ -18,25 +18,37 @@ import (
 
 // --- fake Hydra ---
 
+// fakeHydra records what the handlers send. errs makes a call fail, by its
+// name: "get login", "accept login", "get consent", "accept consent",
+// "accept logout".
 type fakeHydra struct {
 	loginReq       *hydra.LoginRequest
 	consentReq     *hydra.ConsentRequest
+	errs           map[string]error
 	acceptLogin    hydra.LoginAccept
+	loginAccepted  []string // the challenges accepted
 	acceptConsent  hydra.ConsentAccept
 	logoutAccepted string
 }
 
 func (f *fakeHydra) GetLoginRequest(context.Context, string) (*hydra.LoginRequest, error) {
-	return f.loginReq, nil
+	return f.loginReq, f.errs["get login"]
 }
-func (f *fakeHydra) AcceptLogin(_ context.Context, _ string, a hydra.LoginAccept) (string, error) {
+func (f *fakeHydra) AcceptLogin(_ context.Context, c string, a hydra.LoginAccept) (string, error) {
+	if err := f.errs["accept login"]; err != nil {
+		return "", err
+	}
 	f.acceptLogin = a
+	f.loginAccepted = append(f.loginAccepted, c)
 	return "https://hydra/after-login", nil
 }
 func (f *fakeHydra) GetConsentRequest(context.Context, string) (*hydra.ConsentRequest, error) {
-	return f.consentReq, nil
+	return f.consentReq, f.errs["get consent"]
 }
 func (f *fakeHydra) AcceptConsent(_ context.Context, _ string, a hydra.ConsentAccept) (string, error) {
+	if err := f.errs["accept consent"]; err != nil {
+		return "", err
+	}
 	f.acceptConsent = a
 	return "https://hydra/after-consent", nil
 }
@@ -45,6 +57,9 @@ func (f *fakeHydra) RejectConsent(context.Context, string, string, string) (stri
 }
 func (f *fakeHydra) GetLogoutRequest(_ context.Context, c string) (string, error) { return c, nil }
 func (f *fakeHydra) AcceptLogout(_ context.Context, c string) (string, error) {
+	if err := f.errs["accept logout"]; err != nil {
+		return "", err
+	}
 	f.logoutAccepted = c
 	return "https://hydra/after-logout", nil
 }

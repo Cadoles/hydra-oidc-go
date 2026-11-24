@@ -5,6 +5,8 @@ package hydra
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -12,6 +14,53 @@ import (
 
 	ory "github.com/ory/hydra-client-go/v26"
 )
+
+var (
+	// ErrChallengeNotFound: expired, already used, or never issued.
+	ErrChallengeNotFound = errors.New("challenge not found")
+	// ErrUnavailable: the admin API is unreachable or failed.
+	ErrUnavailable = errors.New("hydra unavailable")
+)
+
+// ChallengeGoneError is ErrChallengeNotFound, plus the URL Hydra gives for a
+// challenge it still knows (already used, or expired): it leads back to the
+// client that started the flow, so each user returns to their own site.
+// RedirectTo is empty when Hydra has no trace of the challenge at all.
+type ChallengeGoneError struct {
+	Op         string
+	Status     int
+	RedirectTo string
+}
+
+func (e *ChallengeGoneError) Error() string {
+	return fmt.Sprintf("%s: %v (status %d)", e.Op, ErrChallengeNotFound, e.Status)
+}
+
+func (e *ChallengeGoneError) Unwrap() error { return ErrChallengeNotFound }
+
+// RedirectTo returns the way back to the client for a gone challenge, or "".
+func RedirectTo(err error) string {
+	var gone *ChallengeGoneError
+	if errors.As(err, &gone) {
+		return gone.RedirectTo
+	}
+	return ""
+}
+
+// redirectToOf reads redirect_to from the raw body the SDK keeps on its error.
+func redirectToOf(err error) string {
+	var body interface{ Body() []byte }
+	if !errors.As(err, &body) {
+		return ""
+	}
+	var payload struct {
+		RedirectTo string `json:"redirect_to"`
+	}
+	if json.Unmarshal(body.Body(), &payload) != nil {
+		return ""
+	}
+	return payload.RedirectTo
+}
 
 // LoginRequest is the subset of Hydra's login request the app cares about.
 type LoginRequest struct {
@@ -215,13 +264,30 @@ func (c *SDKClient) AcceptLogout(ctx context.Context, challenge string) (string,
 	return redirect.GetRedirectTo(), nil
 }
 
-// apiErr normalizes SDK errors and non-2xx responses into one error value.
+// apiErr normalizes SDK errors and non-2xx responses into one classified error.
+// The status is read even when the SDK also returned an error, since for a
+// non-2xx it returns both.
 func apiErr(op string, resp *http.Response, err error) error {
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode
+	}
+
+	switch {
+	case status == http.StatusNotFound || status == http.StatusGone:
+		return &ChallengeGoneError{Op: op, Status: status, RedirectTo: redirectToOf(err)}
+	case status >= 500:
+		return fmt.Errorf("%s: %w (status %d)", op, ErrUnavailable, status)
+	}
+
 	if err != nil {
+		if resp == nil {
+			return fmt.Errorf("%s: %w: %v", op, ErrUnavailable, err)
+		}
 		return fmt.Errorf("%s: %w", op, err)
 	}
-	if resp != nil && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
-		return fmt.Errorf("%s: unexpected status %d", op, resp.StatusCode)
+	if status != 0 && (status < 200 || status >= 300) {
+		return fmt.Errorf("%s: unexpected status %d", op, status)
 	}
 	return nil
 }

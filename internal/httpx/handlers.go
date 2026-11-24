@@ -1,6 +1,8 @@
 package httpx
 
 import (
+	"crypto/subtle"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -11,6 +13,7 @@ import (
 	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/hydra"
 	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/metrics"
 	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/oidc"
+	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/upstream"
 )
 
 // protocolClaims are OIDC/JWT envelope claims that must NOT be copied from the
@@ -32,7 +35,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 
 	lr, err := s.Hydra.GetLoginRequest(r.Context(), challenge)
 	if err != nil {
-		s.errorRedirect(w, r, http.StatusBadGateway, "could not fetch login request", err)
+		s.hydraFailed(w, r, "could not fetch login request", err)
 		return
 	}
 
@@ -45,7 +48,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			ACR:     s.Config.AuthACR,
 		})
 		if err != nil {
-			s.errorRedirect(w, r, http.StatusBadGateway, "could not accept (skip) login", err)
+			s.hydraFailed(w, r, "could not accept (skip) login", err)
 			return
 		}
 		http.Redirect(w, r, redirect, http.StatusSeeOther)
@@ -86,7 +89,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		s.errorRedirect(w, r, http.StatusBadRequest, "missing or invalid flow state", err)
 		return
 	}
-	if q.Get("state") != fs.State {
+	if !sameToken(q.Get("state"), fs.State) {
 		s.errorRedirect(w, r, http.StatusForbidden, "state mismatch", nil)
 		return
 	}
@@ -123,13 +126,22 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	for k, v := range idClaims {
 		claims[k] = v
 	}
-	// Augment with userinfo (overrides id_token claims of the same name).
-	if ui, err := s.Upstream.UserInfo(r.Context(), tok); err != nil {
-		s.Logger.Warn("userinfo fetch failed; continuing with id_token claims only", "err", err)
-	} else {
-		for k, v := range ui {
-			claims[k] = v
-		}
+	// Augment with userinfo (overrides id_token claims of the same name). When
+	// the provider is asked for it, a login without it is refused: its claims
+	// would be missing, or someone else's.
+	ui, err := s.Upstream.UserInfo(r.Context(), tok, subject)
+	if errors.Is(err, upstream.ErrUserInfoInvalid) {
+		s.Metrics.LoginOutcome(metrics.LoginInvalid)
+		s.errorRedirect(w, r, http.StatusForbidden, "userinfo verification failed", err)
+		return
+	}
+	if err != nil {
+		s.Metrics.LoginOutcome(metrics.LoginTechnical)
+		s.errorRedirect(w, r, http.StatusBadGateway, "userinfo fetch failed", err)
+		return
+	}
+	for k, v := range ui {
+		claims[k] = v
 	}
 	sanitizeClaims(claims)
 
@@ -146,10 +158,13 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		ACR:     acr,
 	})
 	if err != nil {
-		s.errorRedirect(w, r, http.StatusBadGateway, "could not accept login", err)
+		s.hydraFailed(w, r, "could not accept login", err)
 		return
 	}
-	s.Flow.ClearFlow(w)
+	// The flow cookie is kept until it expires: the browser's back button
+	// returns to the provider, which sends a new code with the same state.
+	// The accept then answers where the finished flow went, instead of an
+	// error for a missing cookie.
 	s.Metrics.LoginOutcome(metrics.LoginSuccess)
 	http.Redirect(w, r, redirect, http.StatusSeeOther)
 }
@@ -165,7 +180,7 @@ func (s *Server) consent(w http.ResponseWriter, r *http.Request) {
 
 	cr, err := s.Hydra.GetConsentRequest(r.Context(), challenge)
 	if err != nil {
-		s.errorRedirect(w, r, http.StatusBadGateway, "could not fetch consent request", err)
+		s.hydraFailed(w, r, "could not fetch consent request", err)
 		return
 	}
 
@@ -189,7 +204,7 @@ func (s *Server) consent(w http.ResponseWriter, r *http.Request) {
 		RememberFor:   s.Config.ConsentRememberFor,
 	})
 	if err != nil {
-		s.errorRedirect(w, r, http.StatusBadGateway, "could not accept consent", err)
+		s.hydraFailed(w, r, "could not accept consent", err)
 		return
 	}
 	http.Redirect(w, r, redirect, http.StatusSeeOther)
@@ -219,7 +234,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	// No upstream logout: accept the Hydra logout directly.
 	redirect, err := s.Hydra.AcceptLogout(r.Context(), challenge)
 	if err != nil {
-		s.errorRedirect(w, r, http.StatusBadGateway, "could not accept logout", err)
+		s.hydraFailed(w, r, "could not accept logout", err)
 		return
 	}
 	s.Flow.ClearSession(r.Context(), w, r)
@@ -227,21 +242,54 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 // logoutCallback handles GET /logout/callback: the upstream post-logout
-// redirect. It accepts the Hydra logout and clears all cookies.
+// redirect. It accepts the Hydra logout and clears all cookies. The state the
+// provider returns must be the one sent to it: otherwise another site could
+// end a logout the user left open at the provider.
 func (s *Server) logoutCallback(w http.ResponseWriter, r *http.Request) {
 	ls, err := s.Flow.ReadLogout(r)
 	if err != nil {
-		s.fail(w, http.StatusBadRequest, "missing or invalid logout state", err)
+		s.errorRedirect(w, r, http.StatusBadRequest, "missing or invalid logout state", err)
+		return
+	}
+	if !sameToken(r.URL.Query().Get("state"), ls.State) {
+		s.errorRedirect(w, r, http.StatusForbidden, "logout state mismatch", nil)
 		return
 	}
 	redirect, err := s.Hydra.AcceptLogout(r.Context(), ls.LogoutChallenge)
 	if err != nil {
-		s.errorRedirect(w, r, http.StatusBadGateway, "could not accept logout", err)
+		s.hydraFailed(w, r, "could not accept logout", err)
 		return
 	}
 	s.Flow.ClearLogout(w)
 	s.Flow.ClearSession(r.Context(), w, r)
 	http.Redirect(w, r, redirect, http.StatusSeeOther)
+}
+
+// hydraFailed answers a failed call to the admin API. A challenge already used
+// or expired (410) comes with the way back to the client that started the
+// flow, followed like a normal answer: the user pressed back, or clicked
+// twice. Without it the challenge is unknown; anything else is a gateway
+// error.
+func (s *Server) hydraFailed(w http.ResponseWriter, r *http.Request, msg string, err error) {
+	if !errors.Is(err, hydra.ErrChallengeNotFound) {
+		s.errorRedirect(w, r, http.StatusBadGateway, msg, err)
+		return
+	}
+	// Never a fixed URL: only Hydra's redirect_to knows which client the
+	// user came from.
+	if to := hydra.RedirectTo(err); to != "" {
+		s.Logger.Info("challenge no longer valid, following redirect_to", "op", msg)
+		http.Redirect(w, r, to, http.StatusSeeOther)
+		return
+	}
+	s.Logger.Info("challenge no longer valid", "op", msg, "err", err)
+	s.errorRedirect(w, r, http.StatusGone, "challenge expired or unknown", nil)
+}
+
+// sameToken compares a random value returned by the browser with the one kept
+// in the cookie, in constant time; an empty value never matches.
+func sameToken(got, want string) bool {
+	return want != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 // errorRedirect logs/reports and either redirects to REDIRECT_ON_ERROR_URL or

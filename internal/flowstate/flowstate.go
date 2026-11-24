@@ -45,40 +45,56 @@ type Store interface {
 	Del(ctx context.Context, key string) error
 }
 
+// flowTTL is how long the login and logout round-trips to the provider may
+// take.
+const flowTTL = 10 * time.Minute
+
 // Manager builds and reads the flow cookies.
 type Manager struct {
-	sc         *securecookie.SecureCookie
+	// codecs holds one codec per cookie: securecookie refuses a value older
+	// than the MaxAge of its codec, and each cookie has its own lifetime.
+	codecs     map[string]*securecookie.SecureCookie
+	ttls       map[string]time.Duration
 	secure     bool
 	cookiePath string
 	store      Store
-	flowTTL    time.Duration
-	sessionTTL time.Duration
 }
 
 // New derives hash+block keys from appSecret (so cookies are signed AND
 // encrypted) and configures the manager. store may be nil (cookie-only).
+// sessionTTL is the lifetime of the upstream session: its cookie, and its
+// entry in the store.
 func New(appSecret, cookiePath string, secure bool, store Store, sessionTTL time.Duration) *Manager {
+	return newManager(appSecret, cookiePath, secure, store, map[string]time.Duration{
+		flowCookie:    flowTTL,
+		logoutCookie:  flowTTL,
+		sessionCookie: sessionTTL,
+	})
+}
+
+func newManager(appSecret, cookiePath string, secure bool, store Store, ttls map[string]time.Duration) *Manager {
 	hashKey := sha256.Sum256([]byte("hydra-oidc-go/hash:" + appSecret))
 	blockKey := sha256.Sum256([]byte("hydra-oidc-go/block:" + appSecret)) // 32 bytes → AES-256
-	sc := securecookie.New(hashKey[:], blockKey[:])
-	sc.MaxAge(int((30 * time.Minute).Seconds()))
+	codecs := make(map[string]*securecookie.SecureCookie, len(ttls))
+	for name, ttl := range ttls {
+		codecs[name] = securecookie.New(hashKey[:], blockKey[:]).MaxAge(int(ttl.Seconds()))
+	}
 	if cookiePath == "" {
 		cookiePath = "/"
 	}
 	return &Manager{
-		sc:         sc,
+		codecs:     codecs,
+		ttls:       ttls,
 		secure:     secure,
 		cookiePath: cookiePath,
 		store:      store,
-		flowTTL:    10 * time.Minute,
-		sessionTTL: sessionTTL,
 	}
 }
 
 // --- flow state (login → callback) ---
 
 func (m *Manager) SetFlow(w http.ResponseWriter, fs FlowState) error {
-	return m.set(w, flowCookie, fs, m.flowTTL)
+	return m.set(w, flowCookie, fs)
 }
 
 func (m *Manager) ReadFlow(r *http.Request) (*FlowState, error) {
@@ -94,7 +110,7 @@ func (m *Manager) ClearFlow(w http.ResponseWriter) { m.clear(w, flowCookie) }
 // --- logout state (logout → logout callback) ---
 
 func (m *Manager) SetLogout(w http.ResponseWriter, ls LogoutState) error {
-	return m.set(w, logoutCookie, ls, m.flowTTL)
+	return m.set(w, logoutCookie, ls)
 }
 
 func (m *Manager) ReadLogout(r *http.Request) (*LogoutState, error) {
@@ -116,12 +132,12 @@ func (m *Manager) SetSession(ctx context.Context, w http.ResponseWriter, idToken
 	value := idToken
 	if m.store != nil {
 		sid := RandString(24)
-		if err := m.store.Put(ctx, sid, idToken, m.sessionTTL); err != nil {
+		if err := m.store.Put(ctx, sid, idToken, m.ttls[sessionCookie]); err != nil {
 			return err
 		}
 		value = sid
 	}
-	return m.set(w, sessionCookie, value, m.sessionTTL)
+	return m.set(w, sessionCookie, value)
 }
 
 // ReadSession returns the upstream id_token, or "" when absent.
@@ -149,8 +165,8 @@ func (m *Manager) ClearSession(ctx context.Context, w http.ResponseWriter, r *ht
 
 // --- helpers ---
 
-func (m *Manager) set(w http.ResponseWriter, name string, value any, ttl time.Duration) error {
-	enc, err := m.sc.Encode(name, value)
+func (m *Manager) set(w http.ResponseWriter, name string, value any) error {
+	enc, err := m.codecs[name].Encode(name, value)
 	if err != nil {
 		return err
 	}
@@ -161,7 +177,7 @@ func (m *Manager) set(w http.ResponseWriter, name string, value any, ttl time.Du
 		HttpOnly: true,
 		Secure:   m.secure,
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int(ttl.Seconds()),
+		MaxAge:   int(m.ttls[name].Seconds()),
 	})
 	return nil
 }
@@ -171,7 +187,7 @@ func (m *Manager) read(r *http.Request, name string, dst any) error {
 	if err != nil {
 		return err
 	}
-	return m.sc.Decode(name, c.Value, dst)
+	return m.codecs[name].Decode(name, c.Value, dst)
 }
 
 func (m *Manager) clear(w http.ResponseWriter, name string) {

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,10 +23,18 @@ import (
 	"forge.cadoles.com/vcarroy/hydra-oidc-go/internal/config"
 )
 
+// ErrUserInfoInvalid is a userinfo answer the provider did send, but that
+// cannot be trusted: a JWT whose signature does not verify, or a sub that is
+// not the id_token's.
+var ErrUserInfoInvalid = errors.New("userinfo invalid")
+
 // Client talks to the upstream OIDC provider.
 type Client struct {
-	oauth          *oauth2.Config
-	verifier       *oidc.IDTokenVerifier
+	oauth    *oauth2.Config
+	verifier *oidc.IDTokenVerifier
+	// userinfoKeys verifies a userinfo sent as a JWT; nil when
+	// OIDC_VERIFY_SIGNATURE is off.
+	userinfoKeys   *oidc.RemoteKeySet
 	userinfoURL    string
 	logoutEndpoint string
 	pkce           bool
@@ -81,19 +90,35 @@ func New(ctx context.Context, cfg *config.Config, redirectURL string) (*Client, 
 		InsecureSkipSignatureCheck: !cfg.VerifySignature,
 	})
 
-	// Resolve the userinfo endpoint: explicit config, else discovery metadata.
+	// Resolve the userinfo and JWKS endpoints: explicit config, else discovery
+	// metadata.
+	var meta struct {
+		UserInfoURL string `json:"userinfo_endpoint"`
+		JWKSURL     string `json:"jwks_uri"`
+	}
+	_ = provider.Claims(&meta)
 	userinfoURL := cfg.OIDCUserinfoEndpoint
 	if userinfoURL == "" {
-		var meta struct {
-			UserInfoURL string `json:"userinfo_endpoint"`
-		}
-		_ = provider.Claims(&meta)
 		userinfoURL = meta.UserInfoURL
+	}
+	jwksURL := cfg.OIDCJWKSEndpoint
+	if jwksURL == "" {
+		jwksURL = meta.JWKSURL
+	}
+	var userinfoKeys *oidc.RemoteKeySet
+	if cfg.VerifySignature {
+		if jwksURL == "" {
+			return nil, fmt.Errorf("OIDC_VERIFY_SIGNATURE is on but the provider names no JWKS endpoint")
+		}
+		// The key set outlives this call: it fetches the keys when it needs
+		// them, with the context given here.
+		userinfoKeys = oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), httpClient), jwksURL)
 	}
 
 	return &Client{
 		oauth:          oauthCfg,
 		verifier:       verifier,
+		userinfoKeys:   userinfoKeys,
 		userinfoURL:    userinfoURL,
 		logoutEndpoint: cfg.OIDCLogoutEndpoint,
 		pkce:           cfg.PKCEEnabled,
@@ -161,12 +186,18 @@ func (c *Client) VerifyIDToken(ctx context.Context, tok *oauth2.Token, expectedN
 	return raw, idt.Subject, claims, nil
 }
 
-// UserInfo fetches the userinfo endpoint and returns its claims. It tolerates a
-// JWT-encoded response (some IdPs, e.g. FranceConnect, return the userinfo as a
-// signed JWT rather than JSON) by decoding the JWT payload. Returns nil when
-// userinfo is disabled or no endpoint is known.
-func (c *Client) UserInfo(ctx context.Context, tok *oauth2.Token) (map[string]any, error) {
-	if c.skipUserinfo || c.userinfoURL == "" {
+// UserInfoEnabled reports whether the callback asks the provider for the
+// userinfo: an endpoint is known, and OIDC_SKIP_USERINFO is off.
+func (c *Client) UserInfoEnabled() bool { return !c.skipUserinfo && c.userinfoURL != "" }
+
+// UserInfo fetches the userinfo endpoint and returns its claims, or nil when
+// userinfo is disabled or no endpoint is known. The answer is JSON, or a JWT
+// (FranceConnect signs its userinfo): the JWT's signature is verified with
+// the provider's keys, unless OIDC_VERIFY_SIGNATURE is off. Its sub must be
+// subject, the id_token's (OpenID Connect Core 5.3.2): otherwise the answer
+// may be about someone else, and ErrUserInfoInvalid is returned.
+func (c *Client) UserInfo(ctx context.Context, tok *oauth2.Token, subject string) (map[string]any, error) {
+	if !c.UserInfoEnabled() {
 		return nil, nil
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.userinfoURL, nil)
@@ -187,17 +218,28 @@ func (c *Client) UserInfo(ctx context.Context, tok *oauth2.Token) (map[string]an
 		return nil, fmt.Errorf("userinfo: unexpected status %d", resp.StatusCode)
 	}
 
+	payload := body
+	// A JSON object starts with a brace, a JWT never does.
+	if trimmed := strings.TrimSpace(string(body)); !strings.HasPrefix(trimmed, "{") {
+		if c.userinfoKeys != nil {
+			// The key set accepts the asymmetric algorithms only, and the
+			// keys are the provider's: no "none", no HMAC with a public key.
+			payload, err = c.userinfoKeys.VerifySignature(ctx, trimmed)
+			if err != nil {
+				return nil, fmt.Errorf("%w: jwt signature: %v", ErrUserInfoInvalid, err)
+			}
+		} else if payload, err = jwtPayload(trimmed); err != nil {
+			return nil, fmt.Errorf("userinfo not JSON and not a decodable JWT: %w", err)
+		}
+	}
 	claims := map[string]any{}
-	if err := json.Unmarshal(body, &claims); err == nil {
-		return claims, nil
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, fmt.Errorf("decode userinfo: %w", err)
 	}
-	// Not JSON — assume a JWT and decode its payload (no signature check; this
-	// matches the original app, which trusted the TLS channel for userinfo).
-	decoded, derr := decodeJWTPayload(string(body))
-	if derr != nil {
-		return nil, fmt.Errorf("userinfo not JSON and not a decodable JWT: %w", derr)
+	if sub, _ := claims["sub"].(string); sub == "" || sub != subject {
+		return nil, fmt.Errorf("%w: sub is not the id_token's", ErrUserInfoInvalid)
 	}
-	return decoded, nil
+	return claims, nil
 }
 
 // LogoutURL builds the upstream RP-initiated logout URL. OIDC_LOGOUT_ENDPOINT
@@ -249,20 +291,13 @@ func newProviderWithRetry(ctx context.Context, issuer string) (*oidc.Provider, e
 	return nil, err
 }
 
-func decodeJWTPayload(token string) (map[string]any, error) {
-	parts := strings.Split(strings.TrimSpace(token), ".")
-	if len(parts) < 2 {
+// jwtPayload returns the payload of a JWT, its signature not verified.
+func jwtPayload(token string) ([]byte, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
 		return nil, fmt.Errorf("not a JWT")
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]any{}
-	if err := json.Unmarshal(payload, &out); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return base64.RawURLEncoding.DecodeString(parts[1])
 }
 
 func stripQueryParams(rawURL string, drop []string) string {
