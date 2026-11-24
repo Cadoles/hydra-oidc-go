@@ -79,3 +79,22 @@ func TestValidateRequiresJWKSWhenVerifying(t *testing.T) {
 		t.Fatalf("with verification off it should load: %v", err)
 	}
 }
+
+// The lifetime of the upstream session must be positive: zero would turn the
+// age check of its cookie off.
+func TestValidateSessionLifetime(t *testing.T) {
+	for value, ok := range map[string]bool{"7200": true, "1": true, "0": false, "-5": false, "abc": false} {
+		t.Run(value, func(t *testing.T) {
+			baseEnv(t)
+			t.Setenv("OIDC_ISSUER", "https://idp")
+			t.Setenv("HYDRA_OIDC_REDIS_TTL", value)
+			cfg, err := Load()
+			if (err == nil) != ok {
+				t.Fatalf("Load: err = %v, want accepted: %v", err, ok)
+			}
+			if ok && cfg.RedisTTL.Seconds() < 1 {
+				t.Errorf("RedisTTL = %v", cfg.RedisTTL)
+			}
+		})
+	}
+}

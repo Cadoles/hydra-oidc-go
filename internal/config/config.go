@@ -165,6 +165,11 @@ func (c *Config) Validate() error {
 	if c.VerifySignature && c.OIDCIssuer == "" && c.OIDCJWKSEndpoint == "" {
 		return fmt.Errorf("OIDC_VERIFY_SIGNATURE is on but no OIDC_ISSUER (discovery) or OIDC_JWKS_ENDPOINT is set")
 	}
+	// The lifetime of the upstream session is the age past which its cookie is
+	// refused: zero would turn that check off, and keep the cookie for ever.
+	if c.RedisTTL < time.Second {
+		return fmt.Errorf("HYDRA_OIDC_REDIS_TTL must be at least one second")
+	}
 	if len(c.AppSecret) < 16 {
 		return fmt.Errorf("APP_SECRET must be at least 16 bytes")
 	}
